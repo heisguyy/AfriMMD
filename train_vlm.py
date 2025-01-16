@@ -1,5 +1,8 @@
 import wandb
 import torch
+from utils import *
+import random
+import numpy as np
 from torch import nn
 from typing import Dict
 from tqdm.auto import tqdm
@@ -12,94 +15,41 @@ from transformers import AdamW, get_scheduler
 def get_args_parser():
     parser = argparse.ArgumentParser('AFRIMMD Pretraining script', add_help=True)
     parser.add_argument('--batch-size', default=16, type=int)
-    parser.add_argument('--epochs', default=80, type=int)
+    parser.add_argument('--epochs', default=5, type=int)
     parser.add_argument('--device', default='cuda', type=str)
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--max_grad_norm', default=1.0, type=float)
     parser.add_argument('--warmup_steps', default=1000, type=int)
     parser.add_argument('--save_steps', default=1000, type=int)
+    parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--wandb_logging', action='store_true')
     parser.add_argument('--output_dir', type=str, required=True, 
                        help='Directory where model checkpoints and logs will be saved')
     parser.add_argument('--freeze_vision_encoder', action='store_true')
     parser.add_argument('--freeze_language_decoder', action='store_true')
+    parser.add_argument('--lr', default=0.01, type=float) #tried 2e-4 earlier
+       # * Optimizer parameters
+    parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
+                        help='LR scheduler (default: "cosine"')
+    parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
+                        help='Optimizer (default: "adamw"')
+    parser.add_argument('--opt-eps', default=1.0e-09, type=float, metavar='EPSILON',
+                        help='Optimizer Epsilon (default: 1.0e-09)')
+    parser.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
+                        help='Optimizer Betas (default: [0.9, 0.98], use opt default)')
+    parser.add_argument('--clip-grad', type=float, default=1.0, metavar='NORM',
+                        help='Clip gradient norm (default: None, no clipping)')
+    parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
+                        help='SGD momentum (default: 0.9)')
+    parser.add_argument('--weight-decay', type=float, default=0.0,
+                        help='weight decay (default: 0.05)')
     return parser
 
-def compute_training_metrics(logits: torch.Tensor, targets: torch.Tensor, loss: torch.Tensor) -> Dict[str, float]:
-    """
-    Compute pretraining-specific metrics
-    """
-    with torch.no_grad():
-        perplexity = torch.exp(loss)
-        
-        # Vision-Language alignment score (cosine similarity between vision and language features)
-        pred_probs = torch.softmax(logits, dim=-1)
-        accuracy = (torch.argmax(pred_probs, dim=-1) == targets).float().mean()
-        
-        # Vocabulary usage statistics
-        vocab_usage = torch.sum(pred_probs > 0.1, dim=-1).float().mean()
-        
-    return {
-        'loss': loss.item(),
-        'perplexity': perplexity.item(),
-        'accuracy': accuracy.item(),
-        'vocab_usage': vocab_usage.item()
-    }
-    
-def setup_logging(output_dir: str):
-    """Setup training and validation log files"""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    train_log_path = os.path.join(output_dir, 'train_metrics.csv')
-    val_log_path = os.path.join(output_dir, 'val_metrics.csv')
-    
-    # Create CSV files with headers
-    metrics = ['epoch', 'loss', 'perplexity', 'accuracy', 'vocab_usage', 'grad_norm', 'learning_rate']
-    
-    for path in [train_log_path, val_log_path]:
-        if not os.path.exists(path):
-            with open(path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(metrics)
-    
-    return train_log_path, val_log_path
 
-def log_metrics(log_path: str, epoch: int, metrics: Dict[str, float], lr: float = None):
-    """Log metrics to CSV file"""
-    row = [epoch, 
-           metrics['loss'], 
-           metrics['perplexity'], 
-           metrics['accuracy'], 
-           metrics['vocab_usage'],
-           metrics.get('grad_norm', 0),
-           lr if lr is not None else 0]
-    
-    with open(log_path, 'a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(row)
-
-def save_checkpoint(output_dir: str, model, optimizer, epoch: int, metrics: Dict[str, float], 
-                   is_best: bool = False):
-    """Save model checkpoint"""
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'metrics': metrics
-    }
-    
-    if is_best:
-        save_path = os.path.join(output_dir, 'best_model.pt')
-        print(f"\n=== Saving new best model at epoch {epoch+1} with validation loss: {metrics['loss']:.4f} ===")
-    else:
-        save_path = os.path.join(output_dir, f'checkpoint_epoch_{epoch+1}.pt')
-        print(f"\nSaving checkpoint for epoch {epoch+1}")
-        
-    torch.save(checkpoint, save_path)
-    
-def train_one_epoch(args, model, train_data, epoch, optimizer, lr_scheduler):
+def train_one_epoch(args, model, train_data, epoch, loss_scaler, optimizer, lr_scheduler):
     model.train()
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    # loss_fct = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX,label_smoothing=0.2)
+    
     epoch_metrics = {
         'loss': 0,
         'perplexity': 0,
@@ -113,35 +63,26 @@ def train_one_epoch(args, model, train_data, epoch, optimizer, lr_scheduler):
     
     for step, batch in pbar:
         batch = {k: v.to(args.device) for k, v in batch.items()}
-        
-        # Forward pass
-        outputs = model(batch)
-        logits = outputs.view(-1, outputs.size(-1))
-        targets = batch["input_ids"].view(-1)
-        
-        loss = loss_fn(logits, targets)
+        optimizer.zero_grad()
+        with torch.cuda.amp.autocast():
+            # Forward pass
+            outputs = model(batch)
+            logits = outputs.view(-1, outputs.size(-1))
+            targets = batch["input_ids"].view(-1)
+            loss = loss_fn(logits, targets)
+            
+        # Backward pass
+        loss_scaler._scaler.scale(loss).backward()
         
         # Compute training metrics
         step_metrics = compute_training_metrics(logits, targets, loss)
-        
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping
-        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-        step_metrics['grad_norm'] = grad_norm.item()
-        
-        optimizer.step()
-        lr_scheduler.step()
-        
+       
+        loss_scaler(loss, optimizer, clip_grad=args.clip_grad, parameters=model.parameters())
+    
+
         # Update metrics
         for k, v in step_metrics.items():
             epoch_metrics[k] += v
-        
-        # MPS synchronization
-        if args.device == 'mps':
-            torch.mps.synchronize()
         
         # Update progress bar
         pbar.set_postfix({
@@ -185,22 +126,27 @@ def evaluate(args, model, eval_dataloader):
             # Update metrics
             for k, v in step_metrics.items():
                 eval_metrics[k] += v
-            
-            if args.device == 'mps':
-                torch.mps.synchronize()
     
     # Average metrics
     eval_metrics = {k: v/num_steps for k, v in eval_metrics.items()}
     return eval_metrics
 
 def main(args):
+    
     if args.wandb_logging:
         wandb.init(project="afrimmd-pretraining", config=vars(args), dir=args.output_dir)
     
-    train_log_path, val_log_path = setup_logging(args.output_dir)
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    loss_scaler = NativeScaler()
+    device = torch.device(args.device)
+    output_dir = (args.output_dir)
     
     model = SiglipNllb()
-    model.to(args.device)
+    model.to(device)
     
     # Freeze layers based on args
     if args.freeze_vision_encoder:
@@ -237,24 +183,23 @@ def main(args):
         )
     }
     
-    optimizer = AdamW(model.parameters(), lr=5e-5)
+    optimizer = AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
     lr_scheduler = get_scheduler(
-        "linear",
+        "cosine",
         optimizer=optimizer,
         num_warmup_steps=args.warmup_steps,
         num_training_steps=args.epochs * len(dataloaders['train'])
     )
-    
     print(f"Starting SIGLIP and NLLB Pretraining on AFRIMMD dataset")
     print(f"Outputs will be saved to: {args.output_dir}")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
-        train_metrics, lr = train_one_epoch(args, model, dataloaders['train'], epoch, optimizer, lr_scheduler)
-        log_metrics(train_log_path, epoch + 1, train_metrics, lr)
+        train_metrics, _ = train_one_epoch(args, model, dataloaders['train'], epoch, loss_scaler, optimizer, lr_scheduler)
         
         val_metrics = evaluate(args, model, dataloaders['val'])
-        log_metrics(val_log_path, epoch + 1, val_metrics)
+        log_combined_metrics(output_dir, epoch + 1, train_metrics, val_metrics, 
+                           optimizer, model)
         
         print(f"\nEpoch {epoch+1} results:")
         print(f"Train metrics: {train_metrics}")
@@ -262,18 +207,19 @@ def main(args):
         
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
-            save_checkpoint(args.output_dir, model, optimizer, epoch, val_metrics, is_best=True)
+            save_checkpoint(output_dir, model, optimizer, epoch, val_metrics, is_best=True)
         
         if epoch == args.epochs - 1:
-            save_checkpoint(args.output_dir, model, optimizer, epoch, val_metrics, is_best=False)
+            save_checkpoint(output_dir, model, optimizer, epoch, val_metrics, is_best=False)
     
     if args.eval:
         test_metrics = evaluate(args, model, dataloaders['test'])
-        with open(os.path.join(args.output_dir, 'test_metrics.json'), 'w') as f:
+        with open(os.path.join(args.output_dir, 'test_metrics.txt'), 'w') as f:
             json.dump(test_metrics, f, indent=4)
 
 if __name__ == "__main__":
     parser = get_args_parser()
     args = parser.parse_args()
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
     main(args)
-
