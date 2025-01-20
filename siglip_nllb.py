@@ -2,7 +2,6 @@
 Script to train a multilingual image captioning model
 combining the power of siglip and nllb
 """
-
 from PIL import Image
 from torch import nn
 from transformers import AutoModel, AutoModelForSeq2SeqLM, AutoProcessor, AutoTokenizer
@@ -10,7 +9,6 @@ from transformers import AutoModel, AutoModelForSeq2SeqLM, AutoProcessor, AutoTo
 # The tokenization method is `<tokens> <eos> <language code>` for source
 # language documents, and `<language code>
 # <tokens> <eos>` for target language documents.
-
 
 class Tokenizer:
     """
@@ -34,7 +32,7 @@ class Tokenizer:
             return_attention_mask=True)
         return_data = {"pixel_values": pixel_values, **inputs}
         return return_data
-
+    
     def detokenize(self, input_ids):
         """
         Detokenize the input_ids
@@ -47,12 +45,10 @@ class Tokenizer:
         nllb_tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M", tgt_lang=target_lang)
         return siglip_image_processor, nllb_tokenizer
 
-
 class SiglipNllb(nn.Module):
     """
     Multilingual Image Captioning Model.
     """
-
     def __init__(self):
         super().__init__()
         self.vit, self.lm, self.lm_head = self.__load_from_huggingface()
@@ -84,19 +80,19 @@ class SiglipNllb(nn.Module):
         lm_head = nllb.lm_head
         return siglip_vit, nllb_decoder, lm_head 
 
-
-if __name__ == "__main__":
-    loss_fn = nn.CrossEntropyLoss()
-    tokenizer = Tokenizer("yor_Latn")
-    image_ = Image.open("data/Images/10815824_2997e03d76.jpg").convert("RGB")
-    tokenized_input= tokenizer(image_, "Ajá aláwọ̀ búráwùn àti funfun kan ń ṣàn kọjá nínú yìnyín.")
-    target_input_ids = tokenized_input["input_ids"]
-    model = SiglipNllb()
-    result = model(tokenized_input)
-    models_output = model.generate("data/Images/10815824_2997e03d76.jpg")
-    print(models_output)
+# if __name__ == "__main__":
+    # loss_fn = nn.CrossEntropyLoss()
+    # tokenizer = Tokenizer("yor_Latn")
+    # image_ = Image.open("data/Images/10815824_2997e03d76.jpg").convert("RGB")
+    # tokenized_input= tokenizer(image_, "Ajá aláwọ̀ búráwùn àti funfun kan ń ṣàn kọjá nínú yìnyín.")
+    # target_input_ids = tokenized_input["input_ids"]
+    # model = SiglipNllb()
+    # result = model(tokenized_input)
+    # models_output = model.generate("data/Images/10815824_2997e03d76.jpg")
+    # print(models_output)
     # logits = result.view(-1, result.size(-1))  
     # targets = target_input_ids.view(-1)
     # loss = loss_fn(logits, targets)
     # print(f"Logits: {logits} Loss:, {loss.item()}")
-
+    
+    # When using the standalone SiglipTokenizer or SiglipProcessor, make sure to pass padding="max_length" as that’s how the model was trained.

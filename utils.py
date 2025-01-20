@@ -11,14 +11,12 @@ def compute_training_metrics(logits: torch.Tensor, targets: torch.Tensor, loss: 
         
         # Vision-Language alignment score (cosine similarity between vision and language features)
         pred_probs = torch.softmax(logits, dim=-1)
-        accuracy = (torch.argmax(pred_probs, dim=-1) == targets).float().mean()
         
         # Vocabulary usage statistics
         vocab_usage = torch.sum(pred_probs > 0.1, dim=-1).float().mean()
     return {
         'loss': loss.item(),
         'perplexity': perplexity.item(),
-        'accuracy': accuracy.item(),
         'vocab_usage': vocab_usage.item()}
 
 def log_combined_metrics(output_dir: str, epoch: int, 
@@ -35,11 +33,9 @@ def log_combined_metrics(output_dir: str, epoch: int,
         "train_lr": current_lr,
         "train_loss": train_metrics['loss'],
         "train_perplexity": train_metrics['perplexity'],
-        "train_accuracy": train_metrics['accuracy'],
         "train_vocab_usage": train_metrics['vocab_usage'],
         "test_loss": test_metrics['loss'],
         "test_perplexity": test_metrics['perplexity'],
-        "test_accuracy": test_metrics['accuracy'],
         "test_vocab_usage": test_metrics['vocab_usage'],
     }
 

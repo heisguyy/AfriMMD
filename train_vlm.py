@@ -26,7 +26,7 @@ def get_args_parser():
                        help='Directory where model checkpoints and logs will be saved')
     parser.add_argument('--freeze_vision_encoder', action='store_true')
     parser.add_argument('--freeze_language_decoder', action='store_true')
-    parser.add_argument('--lr', default=0.01, type=float) #tried 2e-4 earlier
+    parser.add_argument('--lr', default=3.0e-7, type=float) #tried 2e-4, 0.01 earlier, 
        # * Optimizer parameters
     parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
                         help='LR scheduler (default: "cosine"')
@@ -53,9 +53,7 @@ def train_one_epoch(args, model, train_data, epoch, loss_scaler, optimizer, lr_s
     epoch_metrics = {
         'loss': 0,
         'perplexity': 0,
-        'accuracy': 0,
-        'vocab_usage': 0,
-        'grad_norm': 0}
+        'vocab_usage': 0,}
     num_steps = len(train_data)
     
     pbar = tqdm(enumerate(train_data), total=num_steps, 
@@ -104,7 +102,6 @@ def evaluate(args, model, eval_dataloader):
     eval_metrics = {
         'loss': 0,
         'perplexity': 0,
-        'accuracy': 0,
         'vocab_usage': 0
     }
     num_steps = len(eval_dataloader)
