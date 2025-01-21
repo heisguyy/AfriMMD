@@ -1,111 +1,70 @@
-import wandb
-import torch
-from utils import *
-import random
 import numpy as np
-from torch import nn
-from typing import Dict
+from utils import *
 from tqdm.auto import tqdm
-import argparse, json, os, csv
+from torch import nn, optim 
 from datasets import load_dataset
 from siglip_nllb import SiglipNllb
 from dataset import DatasetProcessor
-from transformers import AdamW, get_scheduler
+import wandb, torch, argparse, json, os, random
+from transformers import get_inverse_sqrt_schedule
 
 def get_args_parser():
     parser = argparse.ArgumentParser('AFRIMMD Pretraining script', add_help=True)
     parser.add_argument('--batch-size', default=16, type=int)
-    parser.add_argument('--epochs', default=5, type=int)
+    parser.add_argument('--epochs', default=15, type=int)
     parser.add_argument('--device', default='cuda', type=str)
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--warmup_steps', default=1000, type=int)
-    parser.add_argument('--save_steps', default=1000, type=int)
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--wandb_logging', action='store_true')
     parser.add_argument('--output_dir', type=str, required=True, 
                        help='Directory where model checkpoints and logs will be saved')
-    parser.add_argument('--freeze_vision_encoder', action='store_true')
-    parser.add_argument('--freeze_language_decoder', action='store_true')
-    parser.add_argument('--lr', default=3.0e-7, type=float) #tried 2e-4, 0.01 earlier, 
+    parser.add_argument('--lr', default=2.0e-5, type=float) #tried 2e-4, 0.01 earlier, 
        # * Optimizer parameters
-    parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
-                        help='LR scheduler (default: "cosine"')
-    parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
-                        help='Optimizer (default: "adamw"')
-    parser.add_argument('--opt-eps', default=1.0e-09, type=float, metavar='EPSILON',
-                        help='Optimizer Epsilon (default: 1.0e-09)')
-    parser.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
-                        help='Optimizer Betas (default: [0.9, 0.98], use opt default)')
-    parser.add_argument('--clip-grad', type=float, default=1.0, metavar='NORM',
-                        help='Clip gradient norm (default: None, no clipping)')
-    parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
-                        help='SGD momentum (default: 0.9)')
     parser.add_argument('--weight-decay', type=float, default=0.0,
                         help='weight decay (default: 0.05)')
     return parser
 
 
-def train_one_epoch(args, model, train_data, epoch, loss_scaler, optimizer, lr_scheduler):
+def train_one_epoch(args, model, train_data,epoch, optimizer, loss_fn, lr_scheduler):
     model.train()
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    train_loss = 0
     # loss_fct = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX,label_smoothing=0.2)
+    epoch_metrics = {}
     
-    epoch_metrics = {
-        'loss': 0,
-        'perplexity': 0,
-        'vocab_usage': 0,}
     num_steps = len(train_data)
     
     pbar = tqdm(enumerate(train_data), total=num_steps, 
                 desc=f"Epoch {epoch+1}/{args.epochs}")
     
-    for step, batch in pbar:
+    for steps, batch in pbar:
         batch = {k: v.to(args.device) for k, v in batch.items()}
         optimizer.zero_grad()
-        with torch.cuda.amp.autocast():
-            # Forward pass
-            outputs = model(batch)
-            logits = outputs.view(-1, outputs.size(-1))
-            targets = batch["input_ids"].view(-1)
-            loss = loss_fn(logits, targets)
-            
+        # Forward pass
+        outputs = model(batch)
+        logits = outputs.view(-1, outputs.size(-1))
+        targets = batch["input_ids"].view(-1)
+        loss = loss_fn(logits, targets)
         # Backward pass
-        loss_scaler._scaler.scale(loss).backward()
+        loss.backward()
+        train_loss += loss.item()
         
-        # Compute training metrics
-        step_metrics = compute_training_metrics(logits, targets, loss)
-       
-        loss_scaler(loss, optimizer, clip_grad=args.clip_grad, parameters=model.parameters())
-    
-
-        # Update metrics
-        for k, v in step_metrics.items():
-            epoch_metrics[k] += v
+        optimizer.step()  # Update the model parameters
+        lr_scheduler.step()
         
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f"{step_metrics['loss']:.4f}",
-            'perp': f"{step_metrics['perplexity']:.4f}",
-            'lr': f"{lr_scheduler.get_last_lr()[0]:.7f}"})
-        
-        # Logging
-        if args.wandb_logging:
-            wandb.log(step_metrics)
-    
     # Average epoch metrics
-    epoch_metrics = {k: v/num_steps for k, v in epoch_metrics.items()}
-    return epoch_metrics, lr_scheduler.get_last_lr()[0]
+    epoch_metrics['loss'] = train_loss / num_steps
+    epoch_metrics['perplexity'] = torch.exp(torch.tensor(epoch_metrics['loss']))
+    epoch_metrics['lr'] = lr_scheduler.get_last_lr()[0]
+    # Logging
+    if args.wandb_logging:
+        wandb.log(epoch_metrics)
+    return epoch_metrics
 
-def evaluate(args, model, eval_dataloader):
+def evaluate(args, model, eval_dataloader, loss_fn):
     model.eval()
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-    eval_metrics = {
-        'loss': 0,
-        'perplexity': 0,
-        'vocab_usage': 0
-    }
+    val_loss = 0
     num_steps = len(eval_dataloader)
-    
     with torch.no_grad():
         pbar = tqdm(eval_dataloader, desc="Evaluating")
         for batch in pbar:
@@ -116,17 +75,12 @@ def evaluate(args, model, eval_dataloader):
             targets = batch["input_ids"].view(-1)
             
             loss = loss_fn(logits, targets)
-            
-            # Compute metrics
-            step_metrics = compute_training_metrics(logits, targets, loss)
-            
-            # Update metrics
-            for k, v in step_metrics.items():
-                eval_metrics[k] += v
+            val_loss += loss.item()
     
     # Average metrics
-    eval_metrics = {k: v/num_steps for k, v in eval_metrics.items()}
-    return eval_metrics
+    val_loss_avg = val_loss/num_steps
+    perplexity = torch.exp(torch.tensor(val_loss_avg))
+    return val_loss_avg, perplexity
 
 def main(args):
     
@@ -137,23 +91,14 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    
-    loss_scaler = NativeScaler()
+    loss_fn = nn.CrossEntropyLoss(ignore_index=1)
+
     device = torch.device(args.device)
     output_dir = (args.output_dir)
     
     model = SiglipNllb()
     model.to(device)
-    
-    # Freeze layers based on args
-    if args.freeze_vision_encoder:
-        for param in model.vit.parameters():
-            param.requires_grad = False
-    if args.freeze_language_decoder:
-        for param in model.lm.parameters():
-            param.requires_grad = False
-    model.connector.requires_grad = True
-    
+     
     # Process dataset
     processor = DatasetProcessor()
     raw_data = load_dataset("AfriMM/AfriMMD")
@@ -180,34 +125,42 @@ def main(args):
         )
     }
     
-    optimizer = AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
-    lr_scheduler = get_scheduler(
-        "cosine",
+    optimizer = optim.Adam(model.parameters(), args.lr, weight_decay=args.weight_decay)
+    lr_scheduler = get_inverse_sqrt_schedule(
         optimizer=optimizer,
         num_warmup_steps=args.warmup_steps,
-        num_training_steps=args.epochs * len(dataloaders['train'])
-    )
+        last_epoch = -1)
+    
     print(f"Starting SIGLIP and NLLB Pretraining on AFRIMMD dataset")
     print(f"Outputs will be saved to: {args.output_dir}")
     best_val_loss = float('inf')
     
     for epoch in range(args.epochs):
-        train_metrics, _ = train_one_epoch(args, model, dataloaders['train'], epoch, loss_scaler, optimizer, lr_scheduler)
+        log_data = {}
+        train_metrics = train_one_epoch(args, model, dataloaders['train'], epoch, optimizer, loss_fn, lr_scheduler)
         
-        val_metrics = evaluate(args, model, dataloaders['val'])
-        log_combined_metrics(output_dir, epoch + 1, train_metrics, val_metrics, 
-                           optimizer, model)
+        val_loss_avg, perplexity = evaluate(args, model, dataloaders['val'], loss_fn)
         
         print(f"\nEpoch {epoch+1} results:")
         print(f"Train metrics: {train_metrics}")
-        print(f"Val metrics: {val_metrics}")
+        print(f"Val metrics: {val_loss_avg, perplexity}")
         
-        if val_metrics['loss'] < best_val_loss:
-            best_val_loss = val_metrics['loss']
-            save_checkpoint(output_dir, model, optimizer, epoch, val_metrics, is_best=True)
+        log_data['epoch'] = epoch +1
+        log_data['train_loss'] = train_metrics['loss']
+        log_data['train_perplexity'] = train_metrics['perplexity'].item()
+        log_data['val_loss'] = val_loss_avg
+        log_data['val_perplexity'] = perplexity.item()
+        log_data['train_lr'] = train_metrics['lr']
+        
+        with open(os.path.join(output_dir, "log_file.txt"), 'a') as f:
+            f.write(json.dumps(log_data) + '\n')
+        
+        if val_loss_avg < best_val_loss:
+            best_val_loss = val_loss_avg
+            save_checkpoint(output_dir, model, optimizer, epoch, val_loss_avg, is_best=True)
         
         if epoch == args.epochs - 1:
-            save_checkpoint(output_dir, model, optimizer, epoch, val_metrics, is_best=False)
+            save_checkpoint(output_dir, model, optimizer, epoch, val_loss_avg, is_best=False)
     
     if args.eval:
         test_metrics = evaluate(args, model, dataloaders['test'])
