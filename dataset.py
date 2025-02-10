@@ -46,7 +46,8 @@ class DatasetProcessor:
         return {
             "pixel_values": pixel_values,
             "input_ids": padded_input_ids,
-            "attention_mask": padded_attention_mask
+            "attention_mask": padded_attention_mask,
+            "lang_code": lang_codes,
         }
 
     def transform_dataset(self, dataset) -> DatasetDict:

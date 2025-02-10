@@ -33,11 +33,13 @@ class Tokenizer:
         return_data = {"pixel_values": pixel_values, **inputs}
         return return_data
     
-    def detokenize(self, input_ids):
+    def detokenize(self, input_ids, skip_special_tokens=False):
         """
         Detokenize the input_ids
         """
-        return self.text_tokenizer.decode(input_ids, skip_special_tokens=False)
+        return self.text_tokenizer.decode(
+            input_ids, skip_special_tokens=skip_special_tokens
+        )
 
     def __load_from_huggingface(self, target_lang):
         siglip_image_processor = AutoProcessor.from_pretrained(
