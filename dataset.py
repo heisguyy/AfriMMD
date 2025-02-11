@@ -22,14 +22,15 @@ class DatasetProcessor:
         image = Image.open(f"data/Images/{example['image_id']}").convert("RGB")
         return tokenizer(image, example['caption'])
 
-    def collate_batch(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def collate_batch(self, batch) -> Dict[str, torch.Tensor]:
         """Collate batch with proper padding per language"""
         pixel_values = torch.stack([item["pixel_values"] for item in batch]).squeeze(1)
         input_ids = [item["input_ids"].squeeze(0) for item in batch]
         attention_mask = [item["attention_mask"].squeeze(0) for item in batch]
         
         # Get language codes and pad tokens for this batch
-        lang_codes = [item.get("lang_code", "eng_Latn") for item in batch]  # Default to English if not found
+        lang_codes = [item["lang_code"] for item in batch]
+        captions = [item["caption"] for item in batch]
         pad_tokens = [self.get_tokenizer(lang).text_tokenizer.pad_token_id for lang in lang_codes]
         
         # Pad sequences using language-specific pad tokens
@@ -48,6 +49,7 @@ class DatasetProcessor:
             "input_ids": padded_input_ids,
             "attention_mask": padded_attention_mask,
             "lang_code": lang_codes,
+            "caption": captions,
         }
 
     def transform_dataset(self, dataset) -> DatasetDict:
@@ -89,5 +91,9 @@ class DatasetProcessor:
         tokenized = transformed.map(self.tokenize)
         # Convert to PyTorch tensors
         for split in tokenized.keys():
-            tokenized[split].set_format("torch", columns=["pixel_values", "input_ids", "attention_mask"])
+            tokenized[split].set_format(
+                "torch",
+                columns=["pixel_values", "input_ids", "attention_mask"],
+                output_all_columns=True,
+            )
         return tokenized

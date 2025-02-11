@@ -4,9 +4,11 @@ import os
 import random
 import shutil
 import zipfile
+from ast import literal_eval
 
 import gdown
 import numpy as np
+import pandas as pd
 import torch
 import wandb
 from datasets import DatasetDict, load_dataset
@@ -68,7 +70,9 @@ def train_one_epoch(
 
     for steps, batch in pbar:
         batch = {
-            k: v.to(args.device) for k, v in batch.items() if k != "lang_code"
+            k: v.to(args.device)
+            for k, v in batch.items()
+            if k not in ["lang_code", "captions"]
         }
         optimizer.zero_grad()
         # Forward pass
@@ -97,25 +101,33 @@ def evaluate(args, model, eval_dataloader, loss_fn):
     model.eval()
     val_loss = 0
     num_steps = len(eval_dataloader)
+    prediction = []
+    language_codes = []
+    references = []
     with torch.no_grad():
         pbar = tqdm(eval_dataloader, desc="Evaluating")
         for batch in pbar:
             batch = {
-                k: v.to(args.device) for k, v in batch.items()
-                if k != "lang_code"
+                k: v if k in ["lang_code", "caption"] else v.to(args.device)
+                for k, v in batch.items()
             }
 
             outputs = model(batch)
+            pred_tokens = torch.argmax(outputs, dim=-1)
             logits = outputs.view(-1, outputs.size(-1))
             targets = batch["input_ids"].view(-1)
 
             loss = loss_fn(logits, targets)
             val_loss += loss.item()
 
+            prediction.extend(pred_tokens.cpu().tolist())
+            references.extend(batch["caption"])
+            language_codes.extend(batch["lang_code"])
+
     # Average metrics
     val_loss_avg = val_loss / num_steps
     perplexity = torch.exp(torch.tensor(val_loss_avg))
-    return val_loss_avg, perplexity
+    return val_loss_avg, perplexity, prediction, references, language_codes
 
 
 def main(args):
@@ -212,9 +224,29 @@ def main(args):
             lr_scheduler,
         )
 
-        val_loss_avg, perplexity = evaluate(
+        val_loss_avg, perplexity, batch_preds, batch_ref, batch_lang = evaluate(
             args, model, dataloaders["val"], loss_fn
         )
+        dataframe = pd.DataFrame(
+            {
+                "predictions": batch_preds,
+                "references": batch_ref,
+                "language": batch_lang,
+            }
+        )
+        lang_bleu_scores = {}
+        for lang in dataframe["language"].unique():
+            for lang in dataframe["language"].unique():
+                tokenizer = processor.get_tokenizer(lang)
+                lang_df = dataframe[dataframe["language"] == lang]
+                prediction = tokenizer.text_tokenizer.batch_decode(
+                    lang_df.predictions.values.tolist(),
+                    skip_special_tokens=True,
+                )
+                lang_blue_score = corpus_bleu(
+                    prediction, dataframe.references.tolist(), lowercase=True
+                ).score
+                lang_bleu_scores[lang] = lang_blue_score
 
         print(f"\nEpoch {epoch+1} results:")
         print(f"Train metrics: {train_metrics}")
@@ -226,6 +258,7 @@ def main(args):
         log_data["val_loss"] = val_loss_avg
         log_data["val_perplexity"] = perplexity.item()
         log_data["train_lr"] = train_metrics["lr"]
+        log_data["val_bleu_scores"] = lang_bleu_scores
 
         with open(os.path.join(output_dir, "log_file.txt"), "a") as f:
             f.write(json.dumps(log_data) + "\n")
@@ -240,40 +273,11 @@ def main(args):
             save_checkpoint(
                 output_dir, model, optimizer, epoch, val_loss_avg, is_best=False
             )
-        if epoch % 2 == 0:
-            predicted_text = []
-            references = []
-            with torch.no_grad():
-                pbar = tqdm(dataloaders["test"], desc="Evaluating")
-                for batch in pbar:
-                    batch = {
-                        k: v if k == "lang_code" else v.to(args.device)
-                        for k, v in batch.items()
-                    }
-                    outputs = model(batch)
-                    pred_tokens = torch.argmax(outputs, dim=-1)
-                    targets = batch["input_ids"].view(-1)
-                    for pred, language_code, target in zip(
-                        pred_tokens, batch["lang_code"], targets
-                    ):
-                        tokenizer = Tokenizer(language_code)
-                        pred = pred[pred != tokenizer.text_tokenizer.pad_token_id]
-                        target = target[target != tokenizer.text_tokenizer.pad_token_id]
-
-                        pred_text = tokenizer.detokenize(pred, skip_special_tokens=True)
-                        target_text = tokenizer.detokenize(target, skip_special_tokens=True)
-
-                        predicted_text.append(pred_text)
-                        references.append([target_text])
-            bleu = corpus_bleu(predicted_text, references)
-            print(f"BLEU score: {bleu.score}")
-
 
     if args.eval:
         test_metrics = evaluate(args, model, dataloaders["test"], loss_fn)
         with open(os.path.join(args.output_dir, "test_metrics.txt"), "w") as f:
             json.dump(test_metrics, f, indent=4)
-                
 
 if __name__ == "__main__":
     parser = get_args_parser()
