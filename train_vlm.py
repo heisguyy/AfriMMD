@@ -154,6 +154,7 @@ def main(args):
     for parameters in model.vit.head.mlp.parameters():
         parameters.requires_grad = True
     model.to(device)
+    model = torch.compile(model)
 
     # Process dataset
     processor = DatasetProcessor()

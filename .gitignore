@@ -2,3 +2,5 @@
 /processed_data
 /outputs
 /__pycache__
+/output/best_model.pth
+/output/checkpoint_epoch_15.pth

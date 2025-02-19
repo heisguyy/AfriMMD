@@ -72,7 +72,7 @@ def train_one_epoch(
         batch = {
             k: v.to(args.device)
             for k, v in batch.items()
-            if k not in ["lang_code", "captions"]
+            if k not in ["lang_code", "caption"]
         }
         optimizer.zero_grad()
         # Forward pass
@@ -163,15 +163,11 @@ def main(args):
     output_dir = args.output_dir
 
     model = SiglipNllb()
-    # for parameters in model.vit.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.lm.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.lm_head.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.vit.head.mlp.parameters():
-    #     parameters.requires_grad = True
+    checkpoint = torch.load('output/checkpoint_epoch_15.pth')
+    fixed_state_dict = {k.replace('_orig_mod.', ''): v for k, v in checkpoint['model_state_dict'].items()}
+    model.load_state_dict(fixed_state_dict)
     model.to(device)
+    model = torch.compile(model)
 
     # Process dataset
     processor = DatasetProcessor()
@@ -212,72 +208,97 @@ def main(args):
     print(f"Outputs will be saved to: {args.output_dir}")
     best_val_loss = float("inf")
 
-    for epoch in range(args.epochs):
-        log_data = {}
-        train_metrics = train_one_epoch(
-            args,
-            model,
-            dataloaders["train"],
-            epoch,
-            optimizer,
-            loss_fn,
-            lr_scheduler,
-        )
+    # for epoch in range(args.epochs):
+    #     log_data = {}
+    #     train_metrics = train_one_epoch(
+    #         args,
+    #         model,
+    #         dataloaders["train"],
+    #         epoch,
+    #         optimizer,
+    #         loss_fn,
+    #         lr_scheduler,
+    #     )
 
-        val_loss_avg, perplexity, batch_preds, batch_ref, batch_lang = evaluate(
-            args, model, dataloaders["val"], loss_fn
+    #     val_loss_avg, perplexity, batch_preds, batch_ref, batch_lang = evaluate(
+    #         args, model, dataloaders["val"], loss_fn
+    #     )
+    #     dataframe = pd.DataFrame(
+    #         {
+    #             "predictions": batch_preds,
+    #             "references": batch_ref,
+    #             "language": batch_lang,
+    #         }
+    #     )
+    #     lang_bleu_scores = {}
+    #     for lang in dataframe["language"].unique():
+    #         for lang in dataframe["language"].unique():
+    #             tokenizer = processor.get_tokenizer(lang)
+    #             lang_df = dataframe[dataframe["language"] == lang]
+    #             prediction = tokenizer.text_tokenizer.batch_decode(
+    #                 lang_df.predictions.values.tolist(),
+    #                 skip_special_tokens=True,
+    #             )
+    #             lang_blue_score = corpus_bleu(
+    #                 prediction, dataframe.references.tolist(), lowercase=True
+    #             ).score
+    #             lang_bleu_scores[lang] = lang_blue_score
+
+    #     print(f"\nEpoch {epoch+1} results:")
+    #     print(f"Train metrics: {train_metrics}")
+    #     print(f"Val metrics: {val_loss_avg, perplexity}")
+
+    #     log_data["epoch"] = epoch + 1
+    #     log_data["train_loss"] = train_metrics["loss"]
+    #     log_data["train_perplexity"] = train_metrics["perplexity"].item()
+    #     log_data["val_loss"] = val_loss_avg
+    #     log_data["val_perplexity"] = perplexity.item()
+    #     log_data["train_lr"] = train_metrics["lr"]
+    #     log_data["val_bleu_scores"] = lang_bleu_scores
+
+    #     with open(os.path.join(output_dir, "log_file.txt"), "a") as f:
+    #         f.write(json.dumps(log_data) + "\n")
+
+    #     if val_loss_avg < best_val_loss:
+    #         best_val_loss = val_loss_avg
+    #         save_checkpoint(
+    #             output_dir, model, optimizer, epoch, val_loss_avg, is_best=True
+    #         )
+
+    #     if epoch == args.epochs - 1:
+    #         save_checkpoint(
+    #             output_dir, model, optimizer, epoch, val_loss_avg, is_best=False
+    #         )
+
+    if args.eval:
+        test_loss_avg, perplexity, preds, ref, lang = evaluate(
+            args, model, dataloaders["test"], loss_fn
         )
         dataframe = pd.DataFrame(
             {
-                "predictions": batch_preds,
-                "references": batch_ref,
-                "language": batch_lang,
+                "predictions": preds,
+                "references": ref,
+                "language": lang,
             }
         )
-        lang_bleu_scores = {}
+        dataframe["candidates"] = ""
         for lang in dataframe["language"].unique():
-            for lang in dataframe["language"].unique():
-                tokenizer = processor.get_tokenizer(lang)
-                lang_df = dataframe[dataframe["language"] == lang]
-                prediction = tokenizer.text_tokenizer.batch_decode(
-                    lang_df.predictions.values.tolist(),
-                    skip_special_tokens=True,
-                )
-                lang_blue_score = corpus_bleu(
-                    prediction, dataframe.references.tolist(), lowercase=True
-                ).score
-                lang_bleu_scores[lang] = lang_blue_score
-
-        print(f"\nEpoch {epoch+1} results:")
-        print(f"Train metrics: {train_metrics}")
-        print(f"Val metrics: {val_loss_avg, perplexity}")
-
-        log_data["epoch"] = epoch + 1
-        log_data["train_loss"] = train_metrics["loss"]
-        log_data["train_perplexity"] = train_metrics["perplexity"].item()
-        log_data["val_loss"] = val_loss_avg
-        log_data["val_perplexity"] = perplexity.item()
-        log_data["train_lr"] = train_metrics["lr"]
-        log_data["val_bleu_scores"] = lang_bleu_scores
-
-        with open(os.path.join(output_dir, "log_file.txt"), "a") as f:
-            f.write(json.dumps(log_data) + "\n")
-
-        if val_loss_avg < best_val_loss:
-            best_val_loss = val_loss_avg
-            save_checkpoint(
-                output_dir, model, optimizer, epoch, val_loss_avg, is_best=True
+            tokenizer = processor.get_tokenizer(lang)
+            lang_df = dataframe[dataframe["language"] == lang]
+            prediction = tokenizer.text_tokenizer.batch_decode(
+                lang_df.predictions.to_list(),
+                skip_special_tokens=True,
             )
-
-        if epoch == args.epochs - 1:
-            save_checkpoint(
-                output_dir, model, optimizer, epoch, val_loss_avg, is_best=False
-            )
-
-    if args.eval:
-        test_metrics = evaluate(args, model, dataloaders["test"], loss_fn)
+            dataframe.loc[
+                dataframe["language"] == lang, "candidates"
+            ] = prediction
+        dataframe.to_csv(os.path.join(args.output_dir, "test_predictions.csv"))
+        logs = {
+            "test_loss": test_loss_avg,
+            "test_perplexity": perplexity.item(),
+        }
         with open(os.path.join(args.output_dir, "test_metrics.txt"), "w") as f:
-            json.dump(test_metrics, f, indent=4)
+            json.dump(logs, f, indent=4)
 
 if __name__ == "__main__":
     parser = get_args_parser()

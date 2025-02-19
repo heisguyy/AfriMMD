@@ -12,9 +12,10 @@
             "console": "integratedTerminal",
             "args": [
                 "--output_dir",
-                "outputs",
+                "tests",
                 "--batch-size",
-                "128",
+                "32",
+                "--eval"
             ]
         }
     ]
