@@ -232,17 +232,16 @@ def main(args):
         )
         lang_bleu_scores = {}
         for lang in dataframe["language"].unique():
-            for lang in dataframe["language"].unique():
-                tokenizer = processor.get_tokenizer(lang)
-                lang_df = dataframe[dataframe["language"] == lang]
-                prediction = tokenizer.text_tokenizer.batch_decode(
-                    lang_df.predictions.values.tolist(),
-                    skip_special_tokens=True,
-                )
-                lang_blue_score = corpus_bleu(
-                    prediction, dataframe.references.tolist(), lowercase=True
-                ).score
-                lang_bleu_scores[lang] = lang_blue_score
+            tokenizer = processor.get_tokenizer(lang)
+            lang_df = dataframe[dataframe["language"] == lang]
+            prediction = tokenizer.text_tokenizer.batch_decode(
+                lang_df.predictions.values.tolist(),
+                skip_special_tokens=True,
+            )
+            lang_blue_score = corpus_bleu(
+                prediction, dataframe.references.tolist(), lowercase=True
+            ).score
+            lang_bleu_scores[lang] = lang_blue_score
 
         print(f"\nEpoch {epoch+1} results:")
         print(f"Train metrics: {train_metrics}")
