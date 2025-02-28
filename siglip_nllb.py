@@ -1,100 +1,200 @@
-"""
-Script to train a multilingual image captioning model
-combining the power of siglip and nllb
-"""
-from PIL import Image
+import math
+from typing import Callable, Optional, Tuple
+
+import torch
 from torch import nn
-from transformers import AutoModel, AutoModelForSeq2SeqLM, AutoProcessor, AutoTokenizer
+from transformers import (
+    M2M100Config,
+    M2M100Model,
+    SiglipVisionConfig,
+    SiglipVisionModel
+)
 
-# The tokenization method is `<tokens> <eos> <language code>` for source
-# language documents, and `<language code>
-# <tokens> <eos>` for target language documents.
+from transformers.modeling_outputs import (
+    CausalLMOutputWithCrossAttentions,
+    Seq2SeqLMOutput,
+    Seq2SeqModelOutput,
+)
+from transformers.models.m2m_100.modeling_m2m_100 import (
+    M2M100Decoder,
+    PreTrainedModel,
+    shift_tokens_right,
+    M2M100ScaledWordEmbedding
+)
+from transformers.models.siglip.modeling_siglip import SiglipVisionModel
 
-class Tokenizer:
-    """
-    Tokenizer class
-    """
-    def __init__(self, target_lang: str):
-        self.image_processor, self.text_tokenizer = self.__load_from_huggingface(target_lang)
-        self.text_tokenizer.add_bos_token = False
-        self.text_tokenizer.add_eos_token = False
+from siglip_nllb_config import SiglipNLLBConfig
 
-    def __call__(self, image: Image.Image, text: str):
-        """
-        Tokenize the image and text
-        """
-        pixel_values = self.image_processor(
-            images=image, return_tensors="pt").pixel_values
 
-        inputs = self.text_tokenizer(
-            text_target=text,
-            return_tensors="pt",
-            return_attention_mask=True)
-        return_data = {"pixel_values": pixel_values, **inputs}
-        return return_data
-    
-    def detokenize(self, input_ids, skip_special_tokens=False):
-        """
-        Detokenize the input_ids
-        """
-        return self.text_tokenizer.decode(
-            input_ids, skip_special_tokens=skip_special_tokens
-        )
-
-    def __load_from_huggingface(self, target_lang):
-        siglip_image_processor = AutoProcessor.from_pretrained(
-            "google/siglip-base-patch16-256-multilingual").image_processor
-        nllb_tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M", tgt_lang=target_lang)
-        return siglip_image_processor, nllb_tokenizer
-
-class SiglipNllb(nn.Module):
-    """
-    Multilingual Image Captioning Model.
-    """
-    def __init__(self):
+class SiglipNLLBModule(nn.Module):
+    def __init__(self, config: SiglipNLLBConfig):
         super().__init__()
-        self.vit, self.lm, self.lm_head = self.__load_from_huggingface()
-        self.connector = nn.Linear(768, 1024)
-
-    def forward(self, tokens):
-        """
-        Forward pass
-        """
-        image_features = self.vit(pixel_values=tokens["pixel_values"])
-        image_features = self.connector(image_features.last_hidden_state)
-
-        nllb_output = self.lm(
-            tokens["input_ids"],
-            tokens["attention_mask"],
-            encoder_hidden_states=image_features,
+        self.config = config
+        if self.config.m2m100_config.scale_embedding:
+            embed_scale = math.sqrt(self.config.m2m100_config.d_model)
+        else:
+            embed_scale = 1.0
+        self.shared = M2M100ScaledWordEmbedding(
+            self.config.m2m100_config.vocab_size,
+            self.config.m2m100_config.d_model,
+            self.config.m2m100_config.pad_token_id,
+            embed_scale=embed_scale
         )
-        output = self.lm_head(nllb_output.last_hidden_state)
+        self.encoder = SiglipVisionModel(self.config.siglip_config)
+        self.decoder = M2M100Decoder(
+            self.config.m2m100_config,
+            mbed_tokens=self.shared
+        )
+        self.connector = nn.Linear(
+            self.config.siglip_config.hidden_size,
+            self.config.m2m100_config.d_model
+        )
 
-        return output
+    def forward(
+        self,
+        pixel_values,
+        decoder_input_ids,
+        decoder_attention_mask,
+        decoder_position_ids,
+        decoder_head_mask: Optional[torch.Tensor] = None,
+        cross_attn_head_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[
+            Tuple[Tuple[torch.FloatTensor]]
+        ] = None,
+        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+        interpolate_pos_encoding: bool = False,
+    ):
+        encoder_outputs = self.encoder(
+            pixel_values=pixel_values,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            interpolate_pos_encoding=interpolate_pos_encoding,
+        )
 
-    def __load_from_huggingface(self):
-        """
-        Load the siglip and nllb models from huggingface
-        """
-        siglip_vit = AutoModel.from_pretrained("google/siglip-base-patch16-256-multilingual").vision_model
-        nllb = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
-        nllb_decoder = nllb.get_decoder()
-        lm_head = nllb.lm_head
-        return siglip_vit, nllb_decoder, lm_head 
+        batch_size, sequence_length = encoder_outputs[0].shape[:2]
+        encoder_attention_mask = torch.ones(
+            (batch_size, sequence_length)
+        )
 
-# if __name__ == "__main__":
-    # loss_fn = nn.CrossEntropyLoss()
-    # tokenizer = Tokenizer("yor_Latn")
-    # image_ = Image.open("data/Images/10815824_2997e03d76.jpg").convert("RGB")
-    # tokenized_input= tokenizer(image_, "Ajá aláwọ̀ búráwùn àti funfun kan ń ṣàn kọjá nínú yìnyín.")
-    # target_input_ids = tokenized_input["input_ids"]
-    # model = SiglipNllb()
-    # result = model(tokenized_input)
-    # models_output = model.generate("data/Images/10815824_2997e03d76.jpg")
-    # print(models_output)
-    # logits = result.view(-1, result.size(-1))  
-    # targets = target_input_ids.view(-1)
-    # loss = loss_fn(logits, targets)
-    # print(f"Logits: {logits} Loss:, {loss.item()}")
-    
-    # When using the standalone SiglipTokenizer or SiglipProcessor, make sure to pass padding="max_length" as that’s how the model was trained.
+        encoder_hidden_states = self.connector(encoder_outputs[0])
+        if use_cache is None:
+            use_cache = self.config.use_cache
+        decoder_outputs = self.decoder(
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=decoder_inputs_embeds,
+            use_cache=use_cache,
+            position_ids=decoder_position_ids,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        if not return_dict:
+            return decoder_outputs + encoder_outputs
+
+        return Seq2SeqModelOutput(
+            last_hidden_state=decoder_outputs.last_hidden_state,
+            past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions,
+            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+        )
+
+
+class SiglipNLLBForConditionalGenerationModule(nn.Module):
+    def __init__(self, config: SiglipNLLBConfig):
+        super().__init__()
+        self.config = config
+        self.model = SiglipNLLBModule(config=self.config)
+        self.lm_head = nn.Linear(
+            self.config.m2m100_config.d_model,
+            self.model.shared.num_embeddings,
+            bias=False
+        )
+        
+
+    def forward(
+        self,
+        pixel_values,
+        decoder_input_ids,
+        decoder_attention_mask,
+        decoder_position_ids,
+        decoder_head_mask: Optional[torch.Tensor] = None,
+        cross_attn_head_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[
+            Tuple[Tuple[torch.FloatTensor]]
+        ] = None,
+        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+        interpolate_pos_encoding: bool = False,
+    ):
+        outputs = self.model(
+            pixel_values,
+            decoder_input_ids,
+            decoder_attention_mask,
+            decoder_position_ids,
+            decoder_head_mask,
+            cross_attn_head_mask,
+            past_key_values,
+            decoder_inputs_embeds,
+            use_cache,
+            output_attentions,
+            output_hidden_states,
+            return_dict,
+            interpolate_pos_encoding,
+        )
+        lm_logits = self.lm_head(outputs[0])
+        if not return_dict:
+            output = (lm_logits,) + outputs[1:]
+            return output
+        return Seq2SeqLMOutput(
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
+
+
+class SiglipNLLBPretrainedModel(PreTrainedModel):
+    config_class = SiglipNLLBConfig
+    base_model_prefix = "siglipnllb"
+    supports_gradient_checkpointing = True
+
+    _no_split_modules = [
+        "SiglipTextEmbeddings",
+        "SiglipEncoderLayer",
+        "SiglipVisionEmbeddings",
+        "SiglipMultiheadAttentionPoolingHead","M2M100DecoderLayer"
+    ]
+    _supports_flash_attn_2 = True
+    _supports_sdpa = True
+
+
+class SiglipNLLBForConditionalGeneration(SiglipNLLBPretrainedModel):
+    pass
+
+
+if __name__ == "__main__":
+    SiglipNLLB = FlaxViTBartForConditionalGeneration.from_vit_bart_pretrained('google/vit-base-patch16-224-in21k', 'facebook/bart-large')
+    outputs = SiglipNLLB(pixel_values, input_ids, attention_mask, position_ids, output_hidden_states=True)
