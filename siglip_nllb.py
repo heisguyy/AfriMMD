@@ -3,18 +3,15 @@ Script to train a multilingual image captioning model
 combining the power of siglip and nllb
 """
 
-from typing import Optional
-
 from PIL import Image
 from torch import nn
 from transformers import (
     AutoProcessor,
     AutoTokenizer,
     SiglipVisionModel,
+    M2M100ForConditionalGeneration
 )
 from model import VisionEncoderDecoderModel
-
-from transformers.models.m2m_100.modeling_m2m_100 import M2M100Decoder
 
 # The tokenization method is `<tokens> <eos> <language code>` for source
 # language documents, and `<language code>
@@ -69,7 +66,9 @@ class Tokenizer:
 vision_encoder = SiglipVisionModel.from_pretrained(
     "google/siglip-base-patch16-256-multilingual"
 )
-decoder = M2M100Decoder.from_pretrained("facebook/nllb-200-distilled-600M")
+decoder = M2M100ForConditionalGeneration.from_pretrained(
+    "facebook/nllb-200-distilled-600M"
+).model.decoder
 model = VisionEncoderDecoderModel(encoder=vision_encoder, decoder=decoder)
 
 model.config.bos_token_id = decoder.config.bos_token_id
