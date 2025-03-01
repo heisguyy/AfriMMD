@@ -15,7 +15,7 @@ from tqdm.auto import tqdm
 from transformers import get_inverse_sqrt_schedule
 
 from dataset import DatasetProcessor
-from siglip_nllb import SiglipNllb
+from siglip_nllb import model
 from utils import *
 
 
@@ -144,7 +144,6 @@ def main(args):
     device = torch.device(args.device)
     output_dir = args.output_dir
 
-    model = SiglipNllb()
     for parameters in model.vit.parameters():
         parameters.requires_grad = False
     for parameters in model.lm.parameters():
