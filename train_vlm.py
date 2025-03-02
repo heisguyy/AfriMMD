@@ -3,7 +3,7 @@ from utils import *
 from tqdm.auto import tqdm
 from torch import nn, optim 
 from datasets import load_dataset
-from siglip_nllb import SiglipNllb
+from siglip_nllb import model
 from dataset import DatasetProcessor
 import wandb, torch, argparse, json, os, random
 from transformers import get_inverse_sqrt_schedule
@@ -82,7 +82,7 @@ def evaluate(args, model, eval_dataloader, loss_fn):
     perplexity = torch.exp(torch.tensor(val_loss_avg))
     return val_loss_avg, perplexity
 
-def main(args):
+def main(args, model):
     
     if args.wandb_logging:
         wandb.init(project="afrimmd-pretraining", config=vars(args), dir=args.output_dir)
@@ -96,13 +96,13 @@ def main(args):
     device = torch.device(args.device)
     output_dir = (args.output_dir)
     
-    model = SiglipNllb()
+    # model = 
     model.to(device)
      
     # Process dataset
     processor = DatasetProcessor()
     raw_data = load_dataset("AfriMM/AfriMMD")
-    raw_data = raw_data['train']
+    raw_data = raw_data['train'].select(range(5))
     processed_data = processor.process(raw_data)
     
     # Create dataloaders
@@ -172,4 +172,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
-    main(args)
+    main(args, model)

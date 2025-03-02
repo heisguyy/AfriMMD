@@ -15,6 +15,17 @@ class DatasetProcessor:
         if lang_code not in self.tokenizers:
             self.tokenizers[lang_code] = Tokenizer(lang_code)
         return self.tokenizers[lang_code]
+    
+    # def tokenize(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    #     tokenizer = self.get_tokenizer(example['lang_code'])
+    #     image = Image.open(f"data/Images/{example['image_id']}").convert("RGB")
+    #     tokenized = tokenizer(image, example['caption'])
+    #     # Ensure consistent keys across splits
+    #     if "input_ids" in tokenized:
+    #         tokenized["decoder_input_ids"] = tokenized.pop("input_ids")
+    #     if "attention_mask" in tokenized:
+    #         tokenized["decoder_attention_mask"] = tokenized.pop("attention_mask")
+    #     return tokenized
         
     def tokenize(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Tokenize a single example"""
@@ -88,5 +99,9 @@ class DatasetProcessor:
         tokenized = transformed.map(self.tokenize)
         # Convert to PyTorch tensors
         for split in tokenized.keys():
-            tokenized[split].set_format("torch", columns=["pixel_values", "input_ids", "attention_mask"])
+            print(f"{split}, {tokenized[split].column_names}")
+            tokenized[split].set_format("torch", columns=["pixel_values", "decoder_input_ids", "decoder_attention_mask"]) 
         return tokenized
+    
+    #  ['image_id', 'lang_code', 'caption', 'pixel_values', 'decoder_input_ids', 'decoder_attention_mask']
+    #  ['image_id', 'lang_code', 'caption', 'pixel_values', 'input_ids', 'attention_mask']
