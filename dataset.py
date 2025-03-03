@@ -5,39 +5,61 @@ from datasets import DatasetDict
 from typing import Dict, List, Any
 
 class DatasetProcessor:
+    lang_mapper = {
+        'kab': 'kab_Latn',
+        'afr': 'afr_Latn',
+        'aka': 'aka_Latn',
+        'amh': 'amh_Ethi',
+        'ary': 'ary_Arab',
+        'arz': 'arz_Arab',
+        'bem': 'bem_Latn',
+        'cjk': 'cjk_Latn',
+        'dik': 'dik_Latn',
+        'dyu': 'dyu_Latn',
+        'eng': 'eng_Latn',
+        'ewe': 'ewe_Latn',
+        'fuv': 'fuv_Latn',
+        'hau': 'hau_Latn',
+        'ibo': 'ibo_Latn',
+        'kam': 'kam_Latn',
+        'kik': 'kik_Latn',
+        'kin': 'kin_Latn',
+        'kmb': 'kmb_Latn',
+        'knc': 'knc_Latn',
+        'kon': 'kon_Latn',
+        'lin': 'lin_Latn',
+        'lua': 'lua_Latn',
+        'lug': 'lug_Latn',
+        'yor': 'yor_Latn',
+    }
     def __init__(self, train_size: float = 0.8, test_size: float = 0.1):
         self.train_size = train_size
         self.test_size = test_size
-        self.tokenizers = {}  # Cache for tokenizers
-        
-    def get_tokenizer(self, lang_code: str) -> Tokenizer:
-        """Get or create tokenizer for a language"""
-        if lang_code not in self.tokenizers:
-            self.tokenizers[lang_code] = Tokenizer(lang_code)
-        return self.tokenizers[lang_code]
+        self.tokenizer = Tokenizer()
         
     def tokenize(self, example: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Tokenize a single example"""
-        tokenizer = self.get_tokenizer(example['lang_code'])
         image = Image.open(f"data/Images/{example['image_id']}").convert("RGB")
-        return tokenizer(image, example['caption'])
+        return self.tokenizer(image,example["lang_code"], example['caption'])
 
     def collate_batch(self, batch) -> Dict[str, torch.Tensor]:
         """Collate batch with proper padding per language"""
         pixel_values = torch.stack([item["pixel_values"] for item in batch]).squeeze(1)
-        input_ids = [item["input_ids"].squeeze(0) for item in batch]
-        attention_mask = [item["attention_mask"].squeeze(0) for item in batch]
+        input_ids = [item["decoder_input_ids"].squeeze(0) for item in batch]
+        attention_mask = [item["decoder_attention_mask"].squeeze(0) for item in batch]
+        labels = [item["labels"].squeeze(0) for item in batch]
         
         # Get language codes and pad tokens for this batch
         lang_codes = [item["lang_code"] for item in batch]
         captions = [item["caption"] for item in batch]
-        pad_tokens = [self.get_tokenizer(lang).text_tokenizer.pad_token_id for lang in lang_codes]
+        pad_token = self.tokenizer.text_tokenizer.pad_token_id
         
         # Pad sequences using language-specific pad tokens
-        max_len = max(len(ids) for ids in input_ids)
-        padded_input_ids = torch.stack([
-            torch.cat([ids, torch.full((max_len - len(ids),), pad_tokens[i])]) 
-            for i, ids in enumerate(input_ids)
+        max_len = max(len(ids) for ids in labels)
+        padded_input_ids = torch.stack(input_ids)
+        padded_labels = torch.stack([
+            torch.cat([ids, torch.full((max_len - len(ids),), pad_token)]) 
+            for _, ids in enumerate(labels)
         ])
         
         padded_attention_mask = torch.nn.utils.rnn.pad_sequence(
@@ -46,8 +68,9 @@ class DatasetProcessor:
 
         return {
             "pixel_values": pixel_values,
-            "input_ids": padded_input_ids,
-            "attention_mask": padded_attention_mask,
+            "decoder_input_ids": padded_input_ids,
+            "decoder_attention_mask": padded_attention_mask,
+            "labels": padded_labels,
             "lang_code": lang_codes,
             "caption": captions,
         }
@@ -65,7 +88,7 @@ class DatasetProcessor:
             for image_id, row in zip(batch["image_id"], zip(*[batch[col] for col in lang_columns])):
                 for lang_code, caption in zip(lang_columns, row):
                     new_image_ids.append(image_id)
-                    new_lang_codes.append(lang_code)
+                    new_lang_codes.append(self.lang_mapper[lang_code])
                     new_captions.append(caption)
 
             return {
@@ -93,7 +116,12 @@ class DatasetProcessor:
         for split in tokenized.keys():
             tokenized[split].set_format(
                 "torch",
-                columns=["pixel_values", "input_ids", "attention_mask"],
+                columns=[
+                    "pixel_values",
+                    "decoder_input_ids",
+                    "decoder_attention_mask",
+                    "labels"
+                ],
                 output_all_columns=True,
             )
         return tokenized

@@ -23,14 +23,14 @@ class Tokenizer:
     Tokenizer class
     """
 
-    def __init__(self, target_lang: str):
+    def __init__(self):
         self.image_processor, self.text_tokenizer = (
-            self.__load_from_huggingface(target_lang)
+            self.__load_from_huggingface()
         )
         self.text_tokenizer.add_bos_token = False
         self.text_tokenizer.add_eos_token = False
 
-    def __call__(self, image: Image.Image, target_language: str):
+    def __call__(self, image: Image.Image, target_lang: str, target: str = None):
         """
         Tokenize the image and text
         """
@@ -39,11 +39,21 @@ class Tokenizer:
         ).pixel_values
 
         inputs = self.text_tokenizer(
-            text_target=target_language, return_tensors="pt", return_attention_mask=True,
+            target_lang,
+            return_tensors="pt",
+            return_attention_mask=True,
             add_special_tokens=False
         )
         inputs = {f"decoder_{k}": v for k, v in inputs.items()}
-        return_data = {"pixel_values": pixel_values, **inputs}
+        if target is not None:
+            labels = self.text_tokenizer(
+                target, return_tensors="pt", return_attention_mask=False
+            )
+            return_data = {
+                "pixel_values": pixel_values, "labels": labels["input_ids"], **inputs,
+            }
+        else:
+            return_data = {"pixel_values": pixel_values, **inputs}
         return return_data
 
     def detokenize(self, input_ids, skip_special_tokens=False):
@@ -54,12 +64,12 @@ class Tokenizer:
             input_ids, skip_special_tokens=skip_special_tokens
         )
 
-    def __load_from_huggingface(self, target_lang):
+    def __load_from_huggingface(self):
         siglip_image_processor = AutoProcessor.from_pretrained(
             "google/siglip-base-patch16-256-multilingual"
         ).image_processor
         nllb_tokenizer = AutoTokenizer.from_pretrained(
-            "facebook/nllb-200-distilled-600M", tgt_lang=target_lang
+            "facebook/nllb-200-distilled-600M"
         )
         return siglip_image_processor, nllb_tokenizer
 
@@ -79,8 +89,8 @@ model.config.pad_token_id = decoder.config.pad_token_id
 
 if __name__ == "__main__":
     loss_fn = nn.CrossEntropyLoss()
-    tokenizer = Tokenizer("yor_Latn")
+    tokenizer = Tokenizer()
     image_ = Image.open("data/Images/10815824_2997e03d76.jpg").convert("RGB")
-    tokenized_input= tokenizer(image_, "ibo")
+    tokenized_input= tokenizer(image_, "ibo_Latn")
     result = model.generate(**tokenized_input)
-    print(tokenizer.detokenize(result.squeeze().tolist(), skip_special_tokens=True))
+    print(tokenizer.detokenize(result.squeeze().tolist(), skip_special_tokens=False))

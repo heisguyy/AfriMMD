@@ -13,6 +13,10 @@ from datasets import load_dataset
 from torch import nn, optim
 from tqdm.auto import tqdm
 from transformers import get_inverse_sqrt_schedule
+from transformers import (
+    M2M100ForConditionalGeneration, SiglipVisionModel
+)
+from model import VisionEncoderDecoderModel
 
 from dataset import DatasetProcessor
 from siglip_nllb import model
@@ -66,13 +70,20 @@ def train_one_epoch(
     )
 
     for steps, batch in pbar:
-        batch = {k: v.to(args.device) for k, v in batch.items()}
+        batch = {
+            k: v.to(args.device)
+            for k, v in batch.items()
+            if k not in ["lang_code", "caption"]
+        }
         optimizer.zero_grad()
         # Forward pass
-        outputs = model(batch)
-        logits = outputs.view(-1, outputs.size(-1))
-        targets = batch["input_ids"].view(-1)
-        loss = loss_fn(logits, targets)
+        outputs = model(
+            pixel_values=batch["pixel_values"],
+            decoder_input_ids=batch["decoder_input_ids"],
+            decoder_attention_mask=batch["decoder_attention_mask"],
+            labels=batch["labels"],
+        )
+        loss = outputs.loss
         # Backward pass
         loss.backward()
         train_loss += loss.item()
@@ -97,7 +108,10 @@ def evaluate(args, model, eval_dataloader, loss_fn):
     with torch.no_grad():
         pbar = tqdm(eval_dataloader, desc="Evaluating")
         for batch in pbar:
-            batch = {k: v.to(args.device) for k, v in batch.items()}
+            batch = {
+                k: v if k in ["lang_code", "caption"] else v.to(args.device)
+                for k, v in batch.items()
+            }
 
             outputs = model(batch)
             logits = outputs.view(-1, outputs.size(-1))
@@ -144,21 +158,33 @@ def main(args):
     device = torch.device(args.device)
     output_dir = args.output_dir
 
-    for parameters in model.vit.parameters():
-        parameters.requires_grad = False
-    for parameters in model.lm.parameters():
-        parameters.requires_grad = False
-    for parameters in model.lm_head.parameters():
-        parameters.requires_grad = False
-    for parameters in model.vit.head.mlp.parameters():
-        parameters.requires_grad = True
+    vision_encoder = SiglipVisionModel.from_pretrained(
+        "google/siglip-base-patch16-256-multilingual"
+    )
+    decoder = M2M100ForConditionalGeneration.from_pretrained(
+        "facebook/nllb-200-distilled-600M"
+    ).model.decoder
+    model = VisionEncoderDecoderModel(encoder=vision_encoder, decoder=decoder)
+
+    model.config.bos_token_id = decoder.config.bos_token_id
+    model.config.eos_token_id = decoder.config.eos_token_id
+    model.config.pad_token_id = decoder.config.pad_token_id
+
+    # for parameters in model.vit.parameters():
+    #     parameters.requires_grad = False
+    # for parameters in model.lm.parameters():
+    #     parameters.requires_grad = False
+    # for parameters in model.lm_head.parameters():
+    #     parameters.requires_grad = False
+    # for parameters in model.vit.head.mlp.parameters():
+    #     parameters.requires_grad = True
     model.to(device)
     model = torch.compile(model)
 
     # Process dataset
     processor = DatasetProcessor()
     raw_data = load_dataset("AfriMM/AfriMMD")
-    raw_data = raw_data["train"]
+    raw_data = raw_data["train"].select(range(1))
     processed_data = processor.process(raw_data)
 
     # Create dataloaders
