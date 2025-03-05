@@ -9,9 +9,11 @@ from transformers import (
     AutoProcessor,
     AutoTokenizer,
     SiglipVisionModel,
-    M2M100ForConditionalGeneration
+    M2M100ForConditionalGeneration,
 )
 from model import VisionEncoderDecoderModel
+import torch
+import os
 
 # The tokenization method is `<tokens> <eos> <language code>` for source
 # language documents, and `<language code>
@@ -30,7 +32,7 @@ class Tokenizer:
         self.text_tokenizer.add_bos_token = False
         self.text_tokenizer.add_eos_token = False
 
-    def __call__(self, image: Image.Image, target_lang: str, target: str = None):
+    def __call__(self, image: Image.Image, target: str = None):
         """
         Tokenize the image and text
         """
@@ -38,22 +40,14 @@ class Tokenizer:
             images=image, return_tensors="pt"
         ).pixel_values
 
-        inputs = self.text_tokenizer(
-            target_lang,
-            return_tensors="pt",
-            return_attention_mask=True,
-            add_special_tokens=False
-        )
-        inputs = {f"decoder_{k}": v for k, v in inputs.items()}
+        return_data = {"pixel_values": pixel_values}
         if target is not None:
             labels = self.text_tokenizer(
-                target, return_tensors="pt", return_attention_mask=False
+                text_target=target,
+                return_tensors="pt",
+                return_attention_mask=False,
             )
-            return_data = {
-                "pixel_values": pixel_values, "labels": labels["input_ids"], **inputs,
-            }
-        else:
-            return_data = {"pixel_values": pixel_values, **inputs}
+            return_data["labels"] = labels["input_ids"]
         return return_data
 
     def detokenize(self, input_ids, skip_special_tokens=False):
@@ -73,6 +67,7 @@ class Tokenizer:
         )
         return siglip_image_processor, nllb_tokenizer
 
+
 vision_encoder = SiglipVisionModel.from_pretrained(
     "google/siglip-base-patch16-256-multilingual"
 )
@@ -85,12 +80,39 @@ model.config.bos_token_id = decoder.config.bos_token_id
 model.config.eos_token_id = decoder.config.eos_token_id
 model.config.pad_token_id = decoder.config.pad_token_id
 
+# Load the model state dictionary from the checkpoint
+
+# Check if the checkpoint file exists
+checkpoint_path = "outputs/checkpoint_epoch_15.pth"
+if os.path.exists(checkpoint_path):
+    # Load the state dictionary
+    state_dict = torch.load(checkpoint_path)["model_state_dict"]
+    # Load the state dictionary into the model
+    # Remove "_orig_mod." prefix from keys if present (added when model is compiled)
+    clean_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith("_orig_mod."):
+            clean_state_dict[key[len("_orig_mod."):]] = value
+        else:
+            clean_state_dict[key] = value
+    state_dict = clean_state_dict
+    model.load_state_dict(state_dict)
+    print(f"Model loaded from {checkpoint_path}")
 
 
 if __name__ == "__main__":
     loss_fn = nn.CrossEntropyLoss()
     tokenizer = Tokenizer()
     image_ = Image.open("data/Images/10815824_2997e03d76.jpg").convert("RGB")
-    tokenized_input= tokenizer(image_, "ibo_Latn")
-    result = model.generate(**tokenized_input)
-    print(tokenizer.detokenize(result.squeeze().tolist(), skip_special_tokens=False))
+    tokenized_input = tokenizer(image_)
+    result = model.generate(
+        **tokenized_input,
+        forced_bos_token_id=tokenizer.text_tokenizer.convert_tokens_to_ids(
+            "ibo_Latn"
+        ),
+    )
+    print(
+        tokenizer.detokenize(
+            result.squeeze().tolist(), skip_special_tokens=False
+        )
+    )

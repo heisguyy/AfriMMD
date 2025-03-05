@@ -34,6 +34,12 @@ def get_args_parser():
     parser.add_argument("--warmup_steps", default=1000, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--wandb_logging", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        help="Path to the checkpoint to resume training"
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -54,11 +60,10 @@ def get_args_parser():
 
 
 def train_one_epoch(
-    args, model, train_data, epoch, optimizer, loss_fn, lr_scheduler
+    args, model, train_data, epoch, optimizer, lr_scheduler
 ):
     model.train()
     train_loss = 0
-    # loss_fct = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX,label_smoothing=0.2)
     epoch_metrics = {}
 
     num_steps = len(train_data)
@@ -79,8 +84,6 @@ def train_one_epoch(
         # Forward pass
         outputs = model(
             pixel_values=batch["pixel_values"],
-            decoder_input_ids=batch["decoder_input_ids"],
-            decoder_attention_mask=batch["decoder_attention_mask"],
             labels=batch["labels"],
         )
         loss = outputs.loss
@@ -93,7 +96,9 @@ def train_one_epoch(
 
     # Average epoch metrics
     epoch_metrics["loss"] = train_loss / num_steps
-    epoch_metrics["perplexity"] = torch.exp(torch.tensor(epoch_metrics["loss"]))
+    epoch_metrics["perplexity"] = torch.exp(
+        torch.tensor(epoch_metrics["loss"])
+    ).item()
     epoch_metrics["lr"] = lr_scheduler.get_last_lr()[0]
     # Logging
     if args.wandb_logging:
@@ -101,7 +106,7 @@ def train_one_epoch(
     return epoch_metrics
 
 
-def evaluate(args, model, eval_dataloader, loss_fn):
+def evaluate(args, model, eval_dataloader):
     model.eval()
     val_loss = 0
     num_steps = len(eval_dataloader)
@@ -113,17 +118,17 @@ def evaluate(args, model, eval_dataloader, loss_fn):
                 for k, v in batch.items()
             }
 
-            outputs = model(batch)
-            logits = outputs.view(-1, outputs.size(-1))
-            targets = batch["input_ids"].view(-1)
-
-            loss = loss_fn(logits, targets)
+            outputs = model(
+                pixel_values=batch["pixel_values"],
+                labels=batch["labels"],
+            )
+            loss = outputs.loss
             val_loss += loss.item()
 
     # Average metrics
     val_loss_avg = val_loss / num_steps
     perplexity = torch.exp(torch.tensor(val_loss_avg))
-    return val_loss_avg, perplexity
+    return val_loss_avg, perplexity.item()
 
 
 def main(args):
@@ -153,7 +158,6 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=1)
 
     device = torch.device(args.device)
     output_dir = args.output_dir
@@ -169,22 +173,48 @@ def main(args):
     model.config.bos_token_id = decoder.config.bos_token_id
     model.config.eos_token_id = decoder.config.eos_token_id
     model.config.pad_token_id = decoder.config.pad_token_id
+    model.config.decoder_start_token_id = decoder.config.bos_token_id
 
-    # for parameters in model.vit.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.lm.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.lm_head.parameters():
-    #     parameters.requires_grad = False
-    # for parameters in model.vit.head.mlp.parameters():
-    #     parameters.requires_grad = True
+    optimizer = optim.Adam(
+        model.parameters(), args.lr, weight_decay=args.weight_decay
+    )
+    last_epoch = -1
+    if args.resume:
+        state_dict = torch.load(args.checkpoint_path, map_location=device)
+        last_epoch = state_dict["epoch"]
+        clean_state_dict = {}
+        for key, value in state_dict["model_state_dict"].items():
+            if key.startswith("_orig_mod."):
+                clean_state_dict[key[len("_orig_mod."):]] = value
+            else:
+                clean_state_dict[key] = value
+        model.load_state_dict(clean_state_dict)
+        print(f"Model loaded from {args.checkpoint_path}")
+        optimizer.load_state_dict(state_dict["optimizer_state_dict"])
+        print(f"Optimizer loaded from {args.checkpoint_path}")
+    
+    lr_scheduler = get_inverse_sqrt_schedule(
+        optimizer=optimizer,
+        num_warmup_steps=args.warmup_steps,
+        last_epoch=last_epoch,
+    )
+
+
+    for parameters in model.encoder.parameters():
+        parameters.requires_grad = False
+    for parameters in model.decoder.parameters():
+        parameters.requires_grad = False
+    for parameters in model.lm_head.parameters():
+        parameters.requires_grad = False
+    for parameters in model.encoder.vision_model.head.mlp.parameters():
+        parameters.requires_grad = True
     model.to(device)
     model = torch.compile(model)
 
     # Process dataset
     processor = DatasetProcessor()
     raw_data = load_dataset("AfriMM/AfriMMD")
-    raw_data = raw_data["train"].select(range(1))
+    raw_data = raw_data["train"]
     processed_data = processor.process(raw_data)
 
     # Create dataloaders
@@ -207,13 +237,6 @@ def main(args):
         ),
     }
 
-    optimizer = optim.Adam(
-        model.parameters(), args.lr, weight_decay=args.weight_decay
-    )
-    lr_scheduler = get_inverse_sqrt_schedule(
-        optimizer=optimizer, num_warmup_steps=args.warmup_steps, last_epoch=-1
-    )
-
     print(f"Starting SIGLIP and NLLB Pretraining on AFRIMMD dataset")
     print(f"Outputs will be saved to: {args.output_dir}")
     best_val_loss = float("inf")
@@ -226,12 +249,11 @@ def main(args):
             dataloaders["train"],
             epoch,
             optimizer,
-            loss_fn,
             lr_scheduler,
         )
 
         val_loss_avg, perplexity = evaluate(
-            args, model, dataloaders["val"], loss_fn
+            args, model, dataloaders["val"]
         )
 
         print(f"\nEpoch {epoch+1} results:")
@@ -240,9 +262,9 @@ def main(args):
 
         log_data["epoch"] = epoch + 1
         log_data["train_loss"] = train_metrics["loss"]
-        log_data["train_perplexity"] = train_metrics["perplexity"].item()
+        log_data["train_perplexity"] = train_metrics["perplexity"]
         log_data["val_loss"] = val_loss_avg
-        log_data["val_perplexity"] = perplexity.item()
+        log_data["val_perplexity"] = perplexity
         log_data["train_lr"] = train_metrics["lr"]
 
         with open(os.path.join(output_dir, "log_file.txt"), "a") as f:

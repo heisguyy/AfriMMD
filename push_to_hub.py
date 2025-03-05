@@ -9,7 +9,7 @@ api.create_repo(repo_id, exist_ok=True)
 
 # Upload the weights file
 api.upload_file(
-    path_or_fileobj="output/checkpoint_epoch_15.pth",
+    path_or_fileobj="outputs/checkpoint_epoch_15.pth",
     path_in_repo="model.pth",
     repo_id=repo_id,
     commit_message="Upload Siglip pytorch weights"

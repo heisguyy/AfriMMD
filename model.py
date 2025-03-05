@@ -782,7 +782,7 @@ class VisionEncoderDecoderModel(PreTrainedModel, GenerationMixin):
             labels, self.config.pad_token_id, self.config.decoder_start_token_id
         )
 
-    def resize_token_embeddings(self, *args, **kwargs):
+    def resize_token_embeddings(self, *_, **__):
         raise NotImplementedError(
             "Resizing the embedding layers via the VisionEncoderDecoderModel directly is not supported.Please use the"
             " respective methods of the wrapped decoder object (model.decoder.resize_token_embeddings(...))"
