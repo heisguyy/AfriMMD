@@ -60,32 +60,25 @@ def get_args_parser():
 
 
 def train_one_epoch(
-    args, model, train_data, epoch, optimizer, lr_scheduler
-):
+    args, model, train_data, epoch, optimizer, lr_scheduler):
     model.train()
     train_loss = 0
     epoch_metrics = {}
 
     num_steps = len(train_data)
 
-    pbar = tqdm(
-        enumerate(train_data),
-        total=num_steps,
-        desc=f"Epoch {epoch+1}/{args.epochs}",
-    )
+    pbar = tqdm(enumerate(train_data), total=num_steps,
+        desc=f"Epoch {epoch+1}/{args.epochs}")
 
-    for steps, batch in pbar:
-        batch = {
-            k: v.to(args.device)
+    for _, batch in pbar:
+        batch = {k: v.to(args.device)
             for k, v in batch.items()
-            if k not in ["lang_code", "caption"]
-        }
+            if k not in ["lang_code", "caption"]}
         optimizer.zero_grad()
         # Forward pass
         outputs = model(
             pixel_values=batch["pixel_values"],
-            labels=batch["labels"],
-        )
+            labels=batch["labels"])
         loss = outputs.loss
         # Backward pass
         loss.backward()
@@ -113,15 +106,10 @@ def evaluate(args, model, eval_dataloader):
     with torch.no_grad():
         pbar = tqdm(eval_dataloader, desc="Evaluating")
         for batch in pbar:
-            batch = {
-                k: v if k in ["lang_code", "caption"] else v.to(args.device)
-                for k, v in batch.items()
-            }
-
-            outputs = model(
-                pixel_values=batch["pixel_values"],
-                labels=batch["labels"],
-            )
+            batch = {k: v if k in ["lang_code", "caption"] else v.to(args.device)
+                for k, v in batch.items()}
+            outputs = model(pixel_values=batch["pixel_values"],
+                labels=batch["labels"],)
             loss = outputs.loss
             val_loss += loss.item()
 
