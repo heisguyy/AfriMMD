@@ -1,33 +1,22 @@
-import argparse
-import json
-import os
-import random
-import shutil
-import zipfile
-from ast import literal_eval
-
-import gdown
+from utils import *
 import numpy as np
 import pandas as pd
-import torch
-import wandb
-from datasets import DatasetDict, load_dataset
-from sacrebleu import corpus_bleu
-from torch import nn, optim
 from tqdm.auto import tqdm
-from transformers import get_inverse_sqrt_schedule
-
+from torch import nn, optim
+from sacrebleu import corpus_bleu
+from datasets import load_dataset
 from dataset import DatasetProcessor
-from siglip_nllb import SiglipNllb, Tokenizer
-from utils import *
-
+from model import VisionEncoderDecoderModel
+from transformers import get_inverse_sqrt_schedule
+import argparse, json, os, random, shutil, zipfile, gdown, torch, wandb
+from transformers import (SiglipVisionModel, M2M100ForConditionalGeneration)
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
         "AFRIMMD Pretraining script", add_help=True
     )
     parser.add_argument("--batch-size", default=16, type=int)
-    parser.add_argument("--epochs", default=15, type=int)
+    parser.add_argument("--epochs", default=30, type=int)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--warmup_steps", default=1000, type=int)
@@ -52,9 +41,7 @@ def get_args_parser():
     return parser
 
 
-def train_one_epoch(
-    args, model, train_data, epoch, optimizer, loss_fn, lr_scheduler
-):
+def train_one_epoch(args, model, train_data, epoch, optimizer, loss_fn, lr_scheduler):
     model.train()
     train_loss = 0
     # loss_fct = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX,label_smoothing=0.2)
@@ -72,14 +59,13 @@ def train_one_epoch(
         batch = {
             k: v.to(args.device)
             for k, v in batch.items()
-            if k not in ["lang_code", "caption"]
-        }
+            if k not in ["lang_code", "caption"]}
         optimizer.zero_grad()
         # Forward pass
-        outputs = model(batch)
-        logits = outputs.view(-1, outputs.size(-1))
-        targets = batch["input_ids"].view(-1)
-        loss = loss_fn(logits, targets)
+        outputs = model(
+            pixel_values=batch["pixel_values"],
+            labels=batch["labels"])
+        loss = outputs.loss
         # Backward pass
         loss.backward()
         train_loss += loss.item()
@@ -109,16 +95,13 @@ def evaluate(args, model, eval_dataloader, loss_fn):
         for batch in pbar:
             batch = {
                 k: v if k in ["lang_code", "caption"] else v.to(args.device)
-                for k, v in batch.items()
-            }
-
-            outputs = model(batch)
-            pred_tokens = torch.argmax(outputs, dim=-1)
-            logits = outputs.view(-1, outputs.size(-1))
-            targets = batch["input_ids"].view(-1)
-
-            loss = loss_fn(logits, targets)
+                for k, v in batch.items()}
+            outputs = model(pixel_values=batch["pixel_values"],
+            labels=batch["labels"],)
+            loss = outputs.loss
             val_loss += loss.item()
+            # pred_tokens = torch.argmax(outputs, dim=-1)
+            pred_tokens = torch.argmax(outputs.logits, dim=-1)
 
             prediction.extend(pred_tokens.cpu().tolist())
             references.extend(batch["caption"])
@@ -162,8 +145,17 @@ def main(args):
     device = torch.device(args.device)
     output_dir = args.output_dir
 
-    model = SiglipNllb()
-    checkpoint = torch.load('output/checkpoint_epoch_15.pth')
+    vision_encoder = SiglipVisionModel.from_pretrained("google/siglip-base-patch16-256-multilingual")
+    decoder = M2M100ForConditionalGeneration.from_pretrained("facebook/nllb-200-distilled-600M").model.decoder
+    model = VisionEncoderDecoderModel(encoder=vision_encoder, decoder=decoder)
+
+    model.config.bos_token_id = decoder.config.bos_token_id
+    model.config.eos_token_id = decoder.config.eos_token_id
+    model.config.pad_token_id = decoder.config.pad_token_id
+    model.config.decoder_start_token_id = model.config.bos_token_id
+
+
+    checkpoint = torch.load('/home/mardiyyahodu/.cache/huggingface/hub/models--AfriMM--SiglipNllb/snapshots/f62b9cba866ed4d3fcc1706b10d00f2ea3cf8ec5/model.pth')
     fixed_state_dict = {k.replace('_orig_mod.', ''): v for k, v in checkpoint['model_state_dict'].items()}
     model.load_state_dict(fixed_state_dict)
     model.to(device)
@@ -171,11 +163,11 @@ def main(args):
 
     # Process dataset
     processor = DatasetProcessor()
-    # raw_data = load_dataset("AfriMM/AfriMMD")
-    # raw_data = raw_data["train"]
-    # processed_data = processor.process(raw_data)
+    raw_data = load_dataset("AfriMM/AfriMMD")
+    raw_data = raw_data["train"]
+    processed_data = processor.process(raw_data)
     # processed_data.save_to_disk("processed_data")
-    processed_data = DatasetDict.load_from_disk("processed_data")
+    # processed_data = DatasetDict.load_from_disk("processed_data")
 
     # Create dataloaders
     dataloaders = {
@@ -211,8 +203,7 @@ def main(args):
     for epoch in range(args.epochs):
         log_data = {}
         train_metrics = train_one_epoch(
-            args,
-            model,
+            args,model,
             dataloaders["train"],
             epoch,
             optimizer,
@@ -221,8 +212,7 @@ def main(args):
         )
 
         val_loss_avg, perplexity, batch_preds, batch_ref, batch_lang = evaluate(
-            args, model, dataloaders["val"], loss_fn
-        )
+            args, model, dataloaders["val"], loss_fn)
         dataframe = pd.DataFrame(
             {
                 "predictions": batch_preds,
@@ -234,13 +224,8 @@ def main(args):
         for lang in dataframe["language"].unique():
             tokenizer = processor.get_tokenizer(lang)
             lang_df = dataframe[dataframe["language"] == lang]
-            prediction = tokenizer.text_tokenizer.batch_decode(
-                lang_df.predictions.values.tolist(),
-                skip_special_tokens=True,
-            )
-            lang_blue_score = corpus_bleu(
-                prediction, dataframe.references.tolist(), lowercase=True
-            ).score
+            prediction = tokenizer.text_tokenizer.batch_decode(lang_df.predictions.values.tolist(),skip_special_tokens=True)
+            lang_blue_score = corpus_bleu(prediction, dataframe.references.tolist(), lowercase=True).score
             lang_bleu_scores[lang] = lang_blue_score
 
         print(f"\nEpoch {epoch+1} results:")
@@ -260,42 +245,24 @@ def main(args):
 
         if val_loss_avg < best_val_loss:
             best_val_loss = val_loss_avg
-            save_checkpoint(
-                output_dir, model, optimizer, epoch, val_loss_avg, is_best=True
-            )
+            save_checkpoint(output_dir, model, optimizer, epoch, val_loss_avg, is_best=True)
 
         if epoch == args.epochs - 1:
-            save_checkpoint(
-                output_dir, model, optimizer, epoch, val_loss_avg, is_best=False
-            )
+            save_checkpoint(output_dir, model, optimizer, epoch, val_loss_avg, is_best=False)
 
     if args.eval:
-        test_loss_avg, perplexity, preds, ref, lang = evaluate(
-            args, model, dataloaders["test"], loss_fn
-        )
-        dataframe = pd.DataFrame(
-            {
-                "predictions": preds,
+        test_loss_avg, perplexity, preds, ref, lang = evaluate(args, model, dataloaders["test"], loss_fn)
+        dataframe = pd.DataFrame({"predictions": preds,
                 "references": ref,
-                "language": lang,
-            }
-        )
+                "language": lang,})
         dataframe["candidates"] = ""
         for lang in dataframe["language"].unique():
             tokenizer = processor.get_tokenizer(lang)
             lang_df = dataframe[dataframe["language"] == lang]
-            prediction = tokenizer.text_tokenizer.batch_decode(
-                lang_df.predictions.to_list(),
-                skip_special_tokens=True,
-            )
-            dataframe.loc[
-                dataframe["language"] == lang, "candidates"
-            ] = prediction
+            prediction = tokenizer.text_tokenizer.batch_decode(lang_df.predictions.to_list(),skip_special_tokens=True,)
+            dataframe.loc[dataframe["language"] == lang, "candidates"] = prediction
         dataframe.to_csv(os.path.join(args.output_dir, "test_predictions.csv"))
-        logs = {
-            "test_loss": test_loss_avg,
-            "test_perplexity": perplexity.item(),
-        }
+        logs = {"test_loss": test_loss_avg,"test_perplexity": perplexity.item(),}
         with open(os.path.join(args.output_dir, "test_metrics.txt"), "w") as f:
             json.dump(logs, f, indent=4)
 
