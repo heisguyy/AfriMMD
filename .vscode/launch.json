@@ -12,12 +12,14 @@
             "console": "integratedTerminal",
             "args": [
                 "--output_dir",
-                "tests",
+                "outputs/",
                 "--batch-size",
                 "16",
-                "--eval",
+                "--resume",
+                "--checkpoint_path",
+                "outputs/checkpoint_epoch_15.pth",
                 "--epoch",
-                "1"
+                "25"
             ]
         }
     ]

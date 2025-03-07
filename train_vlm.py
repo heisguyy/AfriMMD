@@ -91,7 +91,7 @@ def train_one_epoch(
         loss.backward()
         train_loss += loss.item()
 
-        optimizer.step()  # Update the model parameters
+        optimizer.step() # Update the model parameters
         lr_scheduler.step()
 
     # Average epoch metrics
@@ -180,7 +180,7 @@ def main(args):
     )
     last_epoch = -1
     if args.resume:
-        state_dict = torch.load(args.checkpoint_path, map_location=device)
+        state_dict = torch.load(args.checkpoint_path)
         last_epoch = state_dict["epoch"]
         clean_state_dict = {}
         for key, value in state_dict["model_state_dict"].items():
@@ -191,6 +191,18 @@ def main(args):
         model.load_state_dict(clean_state_dict)
         print(f"Model loaded from {args.checkpoint_path}")
         optimizer.load_state_dict(state_dict["optimizer_state_dict"])
+        print(f"Optimizer loaded from {args.checkpoint_path}")
+
+        for param_group in optimizer.param_groups:
+            for param in param_group['params']:
+                if param.grad is not None:
+                    param.grad.data = param.grad.data.to(device)
+        
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+                    
         print(f"Optimizer loaded from {args.checkpoint_path}")
     
     lr_scheduler = get_inverse_sqrt_schedule(
