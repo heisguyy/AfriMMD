@@ -1,3 +1,8 @@
 data/
 result/
 results/
+outputs/
+__pycache__/
+finetune/best_model.pth
+finetune/checkpoint_epoch_30.pth
+finetune/checkpoint_epoch_10.pth

@@ -12,12 +12,9 @@
             "console": "integratedTerminal",
             "args": [
                 "--output_dir",
-                "outputs/",
+                "finetune/",
                 "--batch-size",
                 "16",
-                "--resume",
-                "--checkpoint_path",
-                "outputs/checkpoint_epoch_15.pth",
                 "--epoch",
                 "25"
             ]

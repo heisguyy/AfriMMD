@@ -83,7 +83,7 @@ model.config.pad_token_id = decoder.config.pad_token_id
 # Load the model state dictionary from the checkpoint
 
 # Check if the checkpoint file exists
-checkpoint_path = "outputs/checkpoint_epoch_15.pth"
+checkpoint_path = "finetune/checkpoint_epoch_10.pth"
 if os.path.exists(checkpoint_path):
     # Load the state dictionary
     state_dict = torch.load(checkpoint_path)["model_state_dict"]
@@ -108,7 +108,7 @@ if __name__ == "__main__":
     result = model.generate(
         **tokenized_input,
         forced_bos_token_id=tokenizer.text_tokenizer.convert_tokens_to_ids(
-            "ibo_Latn"
+            "eng_Latn"
         ),
     )
     print(

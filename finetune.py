@@ -155,7 +155,7 @@ def main(args):
     model.config.decoder_start_token_id = model.config.bos_token_id
 
 
-    checkpoint = torch.load('/home/mardiyyahodu/.cache/huggingface/hub/models--AfriMM--SiglipNllb/snapshots/f62b9cba866ed4d3fcc1706b10d00f2ea3cf8ec5/model.pth')
+    checkpoint = torch.load("outputs/checkpoint_epoch_25.pth")
     fixed_state_dict = {k.replace('_orig_mod.', ''): v for k, v in checkpoint['model_state_dict'].items()}
     model.load_state_dict(fixed_state_dict)
     model.to(device)
@@ -163,8 +163,7 @@ def main(args):
 
     # Process dataset
     processor = DatasetProcessor()
-    raw_data = load_dataset("AfriMM/AfriMMD")
-    raw_data = raw_data["train"]
+    raw_data = load_dataset("AfriMM/AFRICaption_filtered")
     processed_data = processor.process(raw_data)
     # processed_data.save_to_disk("processed_data")
     # processed_data = DatasetDict.load_from_disk("processed_data")

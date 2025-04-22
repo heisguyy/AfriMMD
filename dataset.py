@@ -1,7 +1,7 @@
 import torch
 from PIL import Image
 from siglip_nllb import Tokenizer
-from datasets import DatasetDict
+from datasets import DatasetDict, concatenate_datasets
 from typing import Dict, List, Any
 
 class DatasetProcessor:
@@ -76,27 +76,27 @@ class DatasetProcessor:
 
     def transform_dataset(self, dataset) -> DatasetDict:
         """Transform dataset to include language codes and captions"""
-        dataset = dataset.remove_columns(["id"])
-        lang_columns = [col for col in dataset.column_names if col not in ["image_id"]]
 
-        def transform_row(batch):
-            new_image_ids = []
-            new_lang_codes = []
-            new_captions = []
+        def transform(data):
+            combined_datasets = []
 
-            for image_id, row in zip(batch["image_id"], zip(*[batch[col] for col in lang_columns])):
-                for lang_code, caption in zip(lang_columns, row):
-                    new_image_ids.append(image_id)
-                    new_lang_codes.append(self.lang_mapper[lang_code])
-                    new_captions.append(caption)
+            # Process each language split and add language code
+            for lang, dataset in data.items():
+                # Add language code to each example
+                dataset = dataset.map(lambda example: {
+                    "image_id": example["image_id"],
+                    "caption": example["caption"],
+                    "lang_code": self.lang_mapper[lang]
+                })
+                combined_datasets.append(dataset)
 
-            return {
-                "image_id": new_image_ids,
-                "lang_code": new_lang_codes,
-                "caption": new_captions,
-            }
+            # Combine all datasets
+            combined_data = concatenate_datasets(combined_datasets)
+            # Shuffle the combined dataset
+            combined_data = combined_data.shuffle(seed=42)
+            return combined_data
 
-        dataset = dataset.map(transform_row, batched=True, remove_columns=lang_columns)
+        dataset = transform(dataset)
         
         # Split dataset
         train_test = dataset.train_test_split(train_size=self.train_size, test_size=self.test_size)
@@ -107,6 +107,8 @@ class DatasetProcessor:
             "test": test_valid["train"],
             "validation": test_valid["test"]
         })
+
+
     def process(self, dataset) -> DatasetDict:
         """Complete dataset processing pipeline"""
         transformed = self.transform_dataset(dataset)
