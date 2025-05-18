@@ -790,7 +790,12 @@ class VisionEncoderDecoderModel(PreTrainedModel, GenerationMixin):
 
     def _reorder_cache(self, past_key_values, beam_idx):
         # apply decoder cache reordering here
-        return self.decoder._reorder_cache(past_key_values, beam_idx)
+        # M2M100Decoder doesn't have a _reorder_cache method,
+        # so we implement it directly here
+        reordered_past = ()
+        for layer_past in past_key_values:
+            reordered_past += (tuple(past_state.index_select(0, beam_idx) for past_state in layer_past),)
+        return reordered_past
 
 
 __all__ = ["VisionEncoderDecoderModel"]

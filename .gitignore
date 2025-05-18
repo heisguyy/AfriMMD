@@ -2,6 +2,8 @@ data/
 result/
 results/
 outputs/
+pangea_generated_captions.csv/
+pangea_amh_ibo_captions.csv/
 __pycache__/
 finetune/best_model.pth
 finetune/checkpoint_epoch_30.pth
