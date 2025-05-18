@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from PIL import Image
 from typing import Optional, List
-from transformers import AutoProcessor, AutoModelForVision2Seq
+from transformers import PaliGemmaProcessor, PaliGemmaForConditionalGeneration
 import torch
 from tqdm import tqdm
 
@@ -14,7 +14,7 @@ def caption_images_with_paliGemma2(
     reference_column: Optional[str] = None,
     target_language_code: str = "sw",
     batch_size: int = 4,
-    model_name: str = "google/paligemma-3b-pt-224"
+    model_name: str = "google/paligemma2-3b-pt-224"
 ):
     """
     Generate image captions using PaliGemma 2 in a target African language and save results to CSV.
@@ -29,10 +29,17 @@ def caption_images_with_paliGemma2(
         batch_size (int): Number of images to process in a batch.
         model_name (str): Model ID on Hugging Face (default is PaliGemma 2).
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    has_cuda = torch.cuda.is_available()
     
-    processor = AutoProcessor.from_pretrained(model_name)
-    model = AutoModelForVision2Seq.from_pretrained(model_name).to(device)
+    processor = PaliGemmaProcessor.from_pretrained(model_name)
+    model = PaliGemmaForConditionalGeneration.from_pretrained(
+        model_name, 
+        torch_dtype=torch.bfloat16 if has_cuda else torch.float32,
+        device_map="auto"
+    ).eval()
+    
+    # Determine the device for input tensors
+    device = model.device if not isinstance(model.device, str) else torch.device("cuda" if has_cuda else "cpu")
     
     df = pd.read_csv(csv_path)
     all_results = []
@@ -45,12 +52,21 @@ def caption_images_with_paliGemma2(
         images = [Image.open(p).convert("RGB") for p in image_paths]
         
         prompt = f"Describe the image in {target_language_code}:"
-        inputs = processor(images=images, text=[prompt]*len(images), return_tensors="pt", padding=True).to(device)
+        inputs = processor(images=images, text=[prompt]*len(images), return_tensors="pt", padding=True)
         
-        with torch.no_grad():
-            outputs = model.generate(**inputs)
+        # Move inputs to appropriate device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         
-        captions = processor.batch_decode(outputs, skip_special_tokens=True)
+        with torch.inference_mode():
+            input_len = inputs["input_ids"].shape[-1]
+            outputs = model.generate(**inputs, max_new_tokens=100, do_sample=False)
+            
+            # Process each generated output
+            captions = []
+            for output in outputs:
+                generation = output[input_len:]
+                caption = processor.decode(generation, skip_special_tokens=True)
+                captions.append(caption)
 
         for idx, row in batch_df.iterrows():
             result = {
