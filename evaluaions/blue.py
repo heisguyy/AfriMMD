@@ -2,8 +2,8 @@ import pandas as pd
 import evaluate
 
 # --- Config ---
-csv_path = "finetune/test_predictions.csv"
-output_path = "Africaption_BLEU_scores.csv"
+csv_path = "finetune/paligemma_predictions/all.csv"
+output_path = "paligemma_BLEU_scores.csv"
 
 # --- Load CSV ---
 df = pd.read_csv(csv_path)

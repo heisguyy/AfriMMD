@@ -3,8 +3,8 @@ from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 
 # --- Config ---
-csv_path = "finetune/test_predictions.csv"
-output_path = "finetune/CIDEr_scores.csv"
+csv_path = "finetune/paligemma_predictions/all.csv"
+output_path = "paligemma_CIDEr_scores.csv"
 
 # --- Load CSV ---
 df = pd.read_csv(csv_path)

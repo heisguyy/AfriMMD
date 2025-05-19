@@ -1,20 +1,21 @@
 import os
 import pandas as pd
 from PIL import Image
-from typing import Optional, List
-from transformers import PaliGemmaProcessor, PaliGemmaForConditionalGeneration
+from typing import Optional
+from transformers import AutoProcessor, MllamaForConditionalGeneration
 import torch
 from tqdm import tqdm
+import glob
 
-def caption_images_with_paliGemma2(
+def caption_images_with_llama(
     csv_path: str,
     image_root_dir: str,
     output_csv_path: str,
     image_column: str = "image_path",
     reference_column: Optional[str] = None,
-    target_language_code: str = "sw",
+    target_language: str = "yoruba",
     batch_size: int = 4,
-    model_name: str = "google/paligemma2-3b-pt-224"
+    model_name: str = "meta-llama/Llama-3.2-11B-Vision"
 ):
     """
     Generate image captions using PaliGemma 2 in a target African language and save results to CSV.
@@ -31,15 +32,15 @@ def caption_images_with_paliGemma2(
     """
     has_cuda = torch.cuda.is_available()
     
-    processor = PaliGemmaProcessor.from_pretrained(model_name)
-    model = PaliGemmaForConditionalGeneration.from_pretrained(
+    processor = AutoProcessor.from_pretrained(model_name)
+    model = MllamaForConditionalGeneration.from_pretrained(
         model_name, 
-        torch_dtype=torch.bfloat16 if has_cuda else torch.float32,
+        torch_dtype=torch.bfloat16,
         device_map="auto"
     ).eval()
     
     # Determine the device for input tensors
-    device = model.device if not isinstance(model.device, str) else torch.device("cuda" if has_cuda else "cpu")
+    device = torch.device("cuda")
     
     df = pd.read_csv(csv_path)
     all_results = []
@@ -49,9 +50,12 @@ def caption_images_with_paliGemma2(
         image_paths = [
             os.path.join(image_root_dir, path) for path in batch_df[image_column]
         ]
-        images = [Image.open(p).convert("RGB") for p in image_paths]
+        images = [
+            [Image.open(p).convert("RGB")] for p in image_paths if os.path.exists(p)
+        ]
+        print(len(image_paths) - len(images), "images not found")
         
-        prompt = f"Describe the image in {target_language_code}:"
+        prompt = f"<|image|><|begin_of_text|>Caption this image in {target_language} language"
         inputs = processor(images=images, text=[prompt]*len(images), return_tensors="pt", padding=True)
         
         # Move inputs to appropriate device
@@ -80,13 +84,56 @@ def caption_images_with_paliGemma2(
     output_df.to_csv(output_csv_path, index=False)
     print(f"✅ Captioning complete. Results saved to: {output_csv_path}")
 
+languages = [
+    "Amharic",
+    "Hausa",
+    "Igbo",
+    "Yoruba"
+]
 
-caption_images_with_paliGemma2(
-    csv_path="test_data.csv",
-    image_root_dir="data/images",
-    output_csv_path="finetune/paligemma_predictions.csv",
-    image_column="image_id",
-    reference_column="caption",
-    target_language_code="sw",
-    batch_size=8
-)
+for language in languages:
+    caption_images_with_llama(
+        csv_path="test_data.csv",
+        image_root_dir="data/Images",
+        output_csv_path=f"finetune/llama_predictions/{language}.csv",
+        image_column="image_id",
+        reference_column="caption",
+        target_language=language.lower(),
+        batch_size=4,
+    )
+
+
+
+# Path to the predictions directory
+predictions_dir = "finetune/llama_predictions"
+
+# Get all CSV files in the directory
+csv_files = glob.glob(os.path.join(predictions_dir, "*.csv"))
+
+# List to hold all dataframes
+all_dfs = []
+
+# Process each CSV file
+for csv_file in csv_files:
+    if os.path.basename(csv_file) != "all.csv":  # Skip the output file if it exists
+        language = os.path.splitext(os.path.basename(csv_file))[0]  # Extract language name from filename
+        print(f"Processing {os.path.basename(csv_file)}")
+        df = pd.read_csv(csv_file)
+        # Add language column
+        df['language'] = language
+        # Drop duplicates based on image_id
+        df = df.drop_duplicates(subset=['image_id'])
+        all_dfs.append(df)
+
+# Concatenate all dataframes
+combined_df = pd.concat(all_dfs, ignore_index=True)
+combined_df = combined_df.rename(columns={"prediction": "candidates", "reference": "references"})
+# Drop rows with any NaN values
+combined_df = combined_df.dropna()
+print(f"Dropped {len(all_dfs) - len(combined_df)} rows with NaN values")
+
+# Save the combined dataframe
+output_path = os.path.join(predictions_dir, "all.csv")
+combined_df.to_csv(output_path, index=False)
+print(f"✅ Combined data saved to: {output_path}")
+print(f"Total rows in combined dataset: {len(combined_df)}")
