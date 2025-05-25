@@ -20,7 +20,7 @@ from model import VisionEncoderDecoderModel
 
 from dataset import DatasetProcessor
 from siglip_nllb import model
-from utils import *
+from utils.utils import *
 
 
 def get_args_parser():
